@@ -427,19 +427,46 @@ EDGE_SPEAKER_VOICES = {
     "en": ["en-US-AriaNeural", "en-US-GuyNeural", "en-US-MichelleNeural", "en-US-RogerNeural"],
 }
 
+# 声学画像 → 音色（性别/年龄必须对得上，老年男不配年轻女）。
+# 有画像时优先用这张表；缺的组合回退到上面的序号池。
+EDGE_VOICE_BY_PROFILE = {
+    "zh": {
+        ("m", "child"): "zh-CN-YunxiaNeural",
+        ("m", "young"): "zh-CN-YunxiNeural",
+        ("m", "mature"): "zh-CN-YunyangNeural",
+        ("f", "child"): "zh-CN-XiaoxiaoNeural",
+        ("f", "young"): "zh-CN-XiaoxiaoNeural",
+        ("f", "mature"): "zh-CN-XiaoyiNeural",
+    },
+    "en": {
+        ("m", "child"): "en-US-GuyNeural",
+        ("m", "young"): "en-US-AndrewNeural",
+        ("m", "mature"): "en-US-RogerNeural",
+        ("f", "child"): "en-US-AnaNeural",
+        ("f", "young"): "en-US-AriaNeural",
+        ("f", "mature"): "en-US-MichelleNeural",
+    },
+}
+
 
 def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str = "",
-        device: str = "auto", ref_wav: str = "", lang: str = "zh") -> Stats:
+        device: str = "auto", ref_wav: str = "", lang: str = "zh",
+        profiles: dict | None = None) -> Stats:
     os.makedirs(out_dir, exist_ok=True)
     stats = Stats(segments=len(segments))
     pool = EDGE_SPEAKER_VOICES.get(lang, EDGE_SPEAKER_VOICES["zh"])
+    by_profile = EDGE_VOICE_BY_PROFILE.get(lang, {})
     for i, s in enumerate(segments):
         dst = os.path.join(out_dir, f"seg_{i:04d}.wav")
         text = s.translated or s.text
         if backend == "stub":
             _tts_stub(text, dst, s.duration)
         elif backend == "edge":
-            _tts_edge(text, dst, voice or pool[s.speaker % len(pool)])
+            v = voice
+            if not v and profiles and s.speaker in profiles:
+                p = profiles[s.speaker]
+                v = by_profile.get((p["gender"], p["age"]), "")
+            _tts_edge(text, dst, v or pool[s.speaker % len(pool)])
         elif backend == "cosyvoice":
             _tts_cosyvoice(text, dst, ref_wav, device)
         else:

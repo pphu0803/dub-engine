@@ -1,16 +1,16 @@
 # dub-engine
 
-网页视频 AI 配音引擎。当前进度：**v3（2026-10-30）**——全链路 + VAD + 说话人分离 + 多音色配音，成品可听。
+网页视频 AI 配音引擎。当前进度：**v4（2026-10-30 深夜）**——全链路 + VAD + 说话人分离 + **声学画像性别/年龄匹配音色**，默认目标语言中文。
 
 ## 现在能做什么
 
 ```
-取音轨 → 分离 → VAD切区 → 识别+幻觉过滤+diarize → LLM翻译 → 多音色TTS → 混音
-  ✅      ✅      ✅            ✅                    ✅        ✅       ✅
+取音轨 → 分离 → VAD切区 → 识别+幻觉过滤+diarize → 画像(性别/年龄) → LLM翻译 → 匹配音色TTS → 混音
+  ✅      ✅      ✅            ✅                    ✅              ✅        ✅        ✅
 ```
 
-- ✅ v3 实测（120 s B 站纪录片，中英混说→英）：`out/first_v3.wav`，**2 说话人自动分音色**（中文解说员→Aria 女声，英文出镜嘉宾→Guy 男声），7 段 overflow 0。
-- CosyVoice（音色克隆）适配器已写，模型未装——下一步的事。
+- ✅ v4a 实测（120 s 中英混说 → **中文**）：`out/first_v4.wav`，男解说（F0 92Hz）→ 云扬沉稳男声，女嘉宾（F0 222Hz）→ 晓晓女声，7 段 overflow 0。
+- **F0 画像是硬约束**：v3 曾把 222Hz 的女嘉宾配成 Guy 男声——"老年男配年轻女"这类错配靠它杜绝（`dub/profile.py`，pyin 基频 + 频谱质心，edge 合成音频闭环验证）。
 - 🧪 全链路可以用 `--asr stub --mt stub --tts stub` 跑通，验证时间轴和混音。
 
 ## 目录
@@ -210,7 +210,14 @@ work/<hash>/
 4. **ASR 稳定性三连**：① 配乐吟唱段的幻觉循环已由 VAD 切区 + 文本过滤双保险治理（VAD 本身救不了哼唱——silero 判其为人声，能量也不低，只能靠文本信号）；② **whisper 中文繁简摇摆**——同一段音频三次运行三种繁简度（"极端恶劣"→"極端惡劣"），想稳定给 `--source-lang zh`；③ VAD 边缘区摇摆（语音总长 73.9~76.9s 漂），分段数随之漂。全轨长音频模式在混语料上会**把英文解说转成中文循环幻觉**——VAD 逐区转写后该段转出流利英文（这就是 v1"误杀 23s 真解说"的真相）。
 5. **edge-tts 必须 ≥7.3.1**：conda 里自带的 7.2.8 连微软 WebSocket 直接 403（Sec-MS-GEC 校验变了）。已在 venv 内升级遮蔽，不动 conda 基座。**偶发瞬时 403 已加重试（3 次退避）**。
 6. **conda 的 modelscope 包是残缺的**（缺 addict/datasets 一串依赖，装齐要拉全家桶）——别用。CAM++ 走 vendor 路线：`dub/campplus.py`（网络定义）+ `models/campplus_cn_common.bin`（28MB，ModelScope 直下 13MB/s）。前处理 = torchaudio kaldi fbank + 句级均值归一（**fbank 输入要 2D**，1D 会 IndexError）；`CAMPPlus(embedding_size=192)`（默认 512 会对不上权重）。正确性用官方 example 验过：同说话人 cos 0.69 / 异 -0.08。
-7. **还没做说话人级别的音色克隆**：diarize 只到"说话人序号 → 音色池索引"，克隆（每角色一个参考音色）等 CosyVoice/IndexTTS 接入。
+7. **CosyVoice2 音色克隆：已验收环境、产出乱语，判 parked（2026-10-31）**。全过程：
+   - **已打通**：仓库+Matcha 子模块+3.8GB 权重（ModelScope 13MB/s）；8 个依赖坑（addict/HyperPyYAML/lightning/pkg_resources<81/gdown/wget/pyarrow/pyworld/openai-whisper）；torchaudio 2.10 补丁（`load_wav` 改 soundfile，v2.0 与 master 签名不同各打一份）；LLM 权重是 bf16 而 ROCm matmul 报 dtype 错 → 三件套 `.float()`；v2.0 API 传 16k tensor、master 传路径。
+   - **症状**：合成跑通但输出乱语——时长撞 max_len 天花板（40 字出 32.8s）、女声参考克隆出 126Hz 男声、whisper 回读为空。
+   - **已排除**：ROCm 数值（CPU 推理结果一致）、权重错位（strict=True）、文本 token（与 BlankEN tokenizer 逐 id 一致）、repo 版本（master 与 v2.0 结果一致）、mel padding（见下）。
+   - **S1/S2 实验（2026-10-31）**：S1 实锤 speech tokenizer 对 mel padding 敏感——不 pad 348 帧→87 token，pad 到 30s（whisper-20231117 默认行为，官方 pin 的版本）→3000 帧→750 token，前缀 39/87 不同。但 S2 恢复 padding 后仍乱生成 → **假说被否决**，tokenizer 不是病根。
+   - **剩余嫌疑**：torch 2.10（pin 2.3.1）/ transformers 5.x（pin 4.51.3）的 Qwen2 骨干行为差异。**修复要降级共享的 ComfyUI conda 环境——不做**。
+   - **复产路径**：独立环境（单独 venv pin torch==2.3.1+cu121），最佳宿主是 3060 机（原生 CUDA）。权重留在 `C:\code\dub\models\cosyvoice2-0.5B`、补丁留在 `C:\code\dub\CosyVoice`（v2.0 tag，工作树有 load_wav 补丁未提交）。
+   - **当前方案**：说话人音色用 F0 画像 → edge 音色池匹配（`EDGE_VOICE_BY_PROFILE`），性别/年龄保真已满足验收；克隆质量"不要求保真"，边际收益有限。
 8. ~~缓存判断 bug~~（已修 2026-10-30）：`_need("mix")` 查的是 `mix` 不是 `mix.wav`，导致缓存永远 miss、每次全量重跑。现已用 `CACHE_FILES` 短名映射表修正。另注意 `--force` 不含 `final` 时，上游变了混音不会重做。
 
 ---
@@ -219,10 +226,11 @@ work/<hash>/
 
 1. ~~跑通真 ASR~~：✅ 2026-10-30。
 2. ~~全链路第一版~~：✅ 2026-10-30。
-3. ~~diarization + VAD~~：✅ 2026-10-30——silero VAD 切区（幻觉根治 + 时间轴贴语音）+ CAM++ 嵌入聚类（说话人 → 音色池自动分声）。
-4. **音色克隆 TTS 选型**：CosyVoice 3 vs IndexTTS-2.5（`--ref-wav` 通道已留好）；配合 diarize 每角色一个参考音色。
-5. **音色距离约束**：见 v2 架构文档第 2.4 节，解决"两个角色声音太像"。
-6. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
+3. ~~diarization + VAD~~：✅ 2026-10-30。
+4. ~~默认中文 + 性别/年龄匹配音色~~：✅ 2026-10-30（v4a，F0 画像硬约束）。
+5. **音色克隆**：parked，复产路径见已知问题 7（独立 pinned 环境，3060 机优先）。
+6. **音色距离约束**：见 v2 架构文档第 2.4 节。
+7. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
 
 ## 相关文档
 

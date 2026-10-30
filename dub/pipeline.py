@@ -72,6 +72,7 @@ class Runner:
         self.work = os.path.join(opts.workdir, _key(opts))
         os.makedirs(self.work, exist_ok=True)
         self.timings: dict[str, float] = {}
+        self.profiles: dict = {}
 
     def _t(self, name: str, fn):
         t0 = time.perf_counter()
@@ -127,10 +128,23 @@ class Runner:
                 ),
             )
             json.dump([s.to_dict() for s in segs], open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+            os.remove(self._path("profiles.json")) if os.path.exists(self._path("profiles.json")) else None
         else:
             segs = [Segment.from_dict(d) for d in json.load(open(p, encoding="utf-8"))]
         print(f"    片段 {len(segs)}")
+        self.profiles = self._profiles(audio_path, segs)
         return segs
+
+    def _profiles(self, vocals_path: str, segs: list[Segment]) -> dict:
+        """说话人声学画像（性别/年龄）。缓存于 profiles.json，随 asr 失效。"""
+        p = self._path("profiles.json")
+        if os.path.exists(p):
+            return {int(k): v for k, v in json.load(open(p, encoding="utf-8")).items()}
+        from .profile import speaker_profiles
+
+        prof = speaker_profiles(vocals_path, segs)
+        json.dump(prof, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        return prof
 
     def translate(self, segs: list[Segment]) -> Stats:
         p = self._path("trans.json")
@@ -161,6 +175,7 @@ class Runner:
                 lambda: stages.tts(
                     segs, d, backend=self.o.tts_backend, voice=self.o.voice,
                     device=self.o.device, ref_wav=self.o.ref_wav, lang=self.o.lang,
+                    profiles=getattr(self, "profiles", None),
                 ),
             )
         else:
