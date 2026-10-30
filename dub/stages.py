@@ -17,6 +17,17 @@ SR_MIX = 44100
 SR_TTS = 24000
 
 
+def resolve_device(device: str) -> str:
+    if device and device != "auto":
+        return device
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
 @dataclass
 class Segment:
     start: float
@@ -105,6 +116,7 @@ def separate(mix_wav: str, out_dir: str, device: str = "cuda", model_name: str =
 
     model = get_model(model_name)
     model.eval()
+    device = resolve_device(device)
     model.to(device)
 
     ref = wav.mean(0)
@@ -158,7 +170,7 @@ def asr(path: str, backend: str = "auto", model: str = "large-v3-turbo",
 def _asr_faster(path: str, model: str, language: str | None, device: str) -> list[Segment]:
     from faster_whisper import WhisperModel
 
-    dev = "cuda" if device in ("auto", "cuda") else "cpu"
+    dev = "cuda" if resolve_device(device) == "cuda" else "cpu"
     try:
         m = WhisperModel(model, device=dev, compute_type="float16" if dev == "cuda" else "int8")
         segs, _ = m.transcribe(path, language=language, vad_filter=True, beam_size=5)
