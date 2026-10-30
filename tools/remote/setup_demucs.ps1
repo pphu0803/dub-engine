@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
 $Py = "H:\SHARE\ComfyUI\miniconda3\envs\comfyui\python.exe"
-$Venv = "C:\dub\venv"
+$Venv = "C:\code\dub\venv"
 $VenvPy = "$Venv\Scripts\python.exe"
 
 Write-Host "[1/4] 建 venv（--system-site-packages，复用 conda 里的 torch）"

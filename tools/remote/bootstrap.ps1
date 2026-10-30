@@ -1,10 +1,10 @@
 # bootstrap.ps1 — 在 rog-windows 上把运行环境装好
 # 用法（从本地）：
-#   scp tools\remote\bootstrap.ps1 rog-windows:C:/dub/bootstrap.ps1
-#   ssh rog-windows "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dub\bootstrap.ps1"
+#   scp tools\remote\bootstrap.ps1 rog-windows:C:/code/dub/bootstrap.ps1
+#   ssh rog-windows "powershell -NoProfile -ExecutionPolicy Bypass -File C:\code\dub\bootstrap.ps1"
 #
 # 装什么：
-#   * Python 3.12（用户级安装到 C:\dub\python，不改 PATH，不碰系统 Python）
+#   * Python 3.12（用户级安装到 C:\code\dub\python，不改 PATH，不碰系统 Python）
 #   * 项目依赖（requests / av）
 # 不装什么：
 #   * 不装 CUDA / ROCm（这台是 Radeon 8060S，走 CPU 或 DirectML，另议）
@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Root = "C:\dub"
+$Root = "C:\code\dub"
 $PyDir = "$Root\python"
 $PyExe = "$PyDir\python.exe"
 $PyVer = "3.12.10"

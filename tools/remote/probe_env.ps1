@@ -1,5 +1,5 @@
 # 远程环境探测（rog-windows）
-# 用法：ssh rog-windows "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dub\probe_env.ps1"
+# 用法：ssh rog-windows "powershell -NoProfile -ExecutionPolicy Bypass -File C:\code\dub\probe_env.ps1"
 $ErrorActionPreference = "SilentlyContinue"
 $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
