@@ -1,0 +1,390 @@
+"""各阶段实现。重型依赖全部延迟导入，缺了也能退回 stub。"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from . import audio
+
+SR_MIX = 44100
+SR_TTS = 24000
+
+
+@dataclass
+class Segment:
+    start: float
+    end: float
+    text: str = ""
+    translated: str = ""
+    tts_path: str = ""
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    def to_dict(self) -> dict:
+        return {
+            "start": round(self.start, 3),
+            "end": round(self.end, 3),
+            "text": self.text,
+            "translated": self.translated,
+            "tts_path": self.tts_path,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Segment":
+        return cls(d["start"], d["end"], d.get("text", ""), d.get("translated", ""), d.get("tts_path", ""))
+
+
+@dataclass
+class Stats:
+    segments: int = 0
+    overflow: int = 0
+    translated_chars: int = 0
+    notes: list[str] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# 1. 抽取音轨
+# --------------------------------------------------------------------------- #
+
+
+def extract_audio(src: str, dst: str, sr: int = SR_MIX, channels: int = 2) -> float:
+    """任意容器 → wav。返回时长（秒）。"""
+    import av
+
+    container = av.open(src)
+    if not container.streams.audio:
+        raise RuntimeError(f"{src} 里没有音频流")
+    stream = container.streams.audio[0]
+    resampler = av.AudioResampler(
+        format="fltp", layout="stereo" if channels == 2 else "mono", rate=sr
+    )
+    chunks = []
+    try:
+        for frame in container.decode(stream):
+            for f in resampler.resample(frame):
+                chunks.append(f.to_ndarray())
+    except Exception as exc:  # 截断文件
+        print(f"[warn] 解码中断（可能是截断）：{exc}", file=sys.stderr)
+    for f in resampler.resample(None):
+        chunks.append(f.to_ndarray())
+    container.close()
+
+    if not chunks:
+        raise RuntimeError("没有解出任何音频帧")
+    # fltp: (ch, n) → 拼成 (n, ch)
+    data = np.concatenate(chunks, axis=1).T.astype(np.float32)
+    audio.save(dst, data, sr)
+    return len(data) / sr
+
+
+# --------------------------------------------------------------------------- #
+# 2. 人声分离
+# --------------------------------------------------------------------------- #
+
+
+def separate(mix_wav: str, out_dir: str, device: str = "cuda", model_name: str = "htdemucs") -> tuple[str, str]:
+    """返回 (vocals_path, bed_path)。失败则抛异常，由调用方决定是否 duck 兜底。"""
+    import torch
+    import torchaudio
+    from demucs.apply import apply_model
+    from demucs.pretrained import get_model
+
+    wav, sr = torchaudio.load(mix_wav)
+    if sr != SR_MIX:
+        wav = torchaudio.functional.resample(wav, sr, SR_MIX)
+    if wav.shape[0] == 1:
+        wav = wav.repeat(2, 1)
+
+    model = get_model(model_name)
+    model.eval()
+    model.to(device)
+
+    ref = wav.mean(0)
+    norm = (wav - ref.mean()) / (ref.std() + 1e-8)
+    with torch.no_grad():
+        sources = apply_model(model, norm[None], device=device, progress=False)[0]
+    sources = sources * ref.std() + ref.mean()
+
+    names = list(model.sources)
+    if "vocals" not in names:
+        raise RuntimeError(f"模型 {model_name} 没有 vocals 轨：{names}")
+    vi = names.index("vocals")
+    vocals = sources[vi]
+    bed = sources[[i for i in range(len(names)) if i != vi]].sum(0)
+
+    vpath = os.path.join(out_dir, "vocals.wav")
+    bpath = os.path.join(out_dir, "bed.wav")
+    torchaudio.save(vpath, vocals.cpu(), SR_MIX)
+    torchaudio.save(bpath, bed.cpu().clamp(-1, 1), SR_MIX)
+    return vpath, bpath
+
+
+# --------------------------------------------------------------------------- #
+# 3. 识别
+# --------------------------------------------------------------------------- #
+
+
+def asr(path: str, backend: str = "auto", model: str = "large-v3-turbo",
+        language: str | None = None, device: str = "auto") -> list[Segment]:
+    if backend == "stub":
+        data, sr = audio.load(path, sr=16000, mono=True)
+        dur = len(data) / 16000
+        out, t = [], 1.0
+        while t < dur - 1.0:
+            end = min(t + 8.0, dur)
+            out.append(Segment(t, end, "[stub asr]"))
+            t = end + 0.5
+        return out
+    if backend in ("auto", "faster"):
+        try:
+            return _asr_faster(path, model, language, device)
+        except Exception as exc:
+            if backend == "faster":
+                raise
+            print(f"[warn] faster-whisper 不可用（{exc}），改用 transformers", file=sys.stderr)
+    if backend in ("auto", "transformers"):
+        return _asr_transformers(path, language, device)
+    raise ValueError(f"未知 ASR backend: {backend}")
+
+
+def _asr_faster(path: str, model: str, language: str | None, device: str) -> list[Segment]:
+    from faster_whisper import WhisperModel
+
+    dev = "cuda" if device in ("auto", "cuda") else "cpu"
+    try:
+        m = WhisperModel(model, device=dev, compute_type="float16" if dev == "cuda" else "int8")
+        segs, _ = m.transcribe(path, language=language, vad_filter=True, beam_size=5)
+        return [Segment(s.start, s.end, s.text.strip()) for s in segs if s.text.strip()]
+    except Exception:
+        if dev == "cpu":
+            raise
+        m = WhisperModel(model, device="cpu", compute_type="int8")
+        segs, _ = m.transcribe(path, language=language, vad_filter=True, beam_size=5)
+        return [Segment(s.start, s.end, s.text.strip()) for s in segs if s.text.strip()]
+
+
+def _asr_transformers(path: str, language: str | None, device: str) -> list[Segment]:
+    import torch
+    from transformers import pipeline
+
+    model_id = "openai/whisper-large-v3-turbo"
+    dev = 0 if (device in ("auto", "cuda") and torch.cuda.is_available()) else -1
+    pipe = pipeline("automatic-speech-recognition", model=model_id, device=dev,
+                    torch_dtype=torch.float16 if dev == 0 else torch.float32)
+    data, sr = audio.load(path, sr=16000, mono=True)
+    kwargs = {"return_timestamps": True}
+    if language:
+        kwargs["generate_kwargs"] = {"language": language}
+    out = pipe({"array": data[:, 0], "sampling_rate": 16000}, **kwargs)
+    chunks = out.get("chunks") or []
+    segs = []
+    for c in chunks:
+        ts = c.get("timestamp") or (0, 0)
+        if ts[0] is None or ts[1] is None:
+            continue
+        txt = (c.get("text") or "").strip()
+        if txt:
+            segs.append(Segment(float(ts[0]), float(ts[1]), txt))
+    return segs
+
+
+# --------------------------------------------------------------------------- #
+# 4. 翻译
+# --------------------------------------------------------------------------- #
+
+LANG_NAMES = {"zh": "简体中文", "en": "English", "ja": "日本語", "ko": "한국어"}
+
+SYSTEM_PROMPT = """你是专业的影视配音翻译。把输入的每一行字幕翻译成{lang}，要求：
+1. 口语化，像配音演员在说话，不要书面语；
+2. 每行译文长度不超过 max_chars 个字符（这是为了塞进原来的时间窗，超了会盖住下一句）；
+3. 保留人名、专有名词的译法一致；拟声词优先保留原样；
+4. 不要合并或拆分行，保持行数一致；
+5. 只输出 JSON：{{"lines":[{{"i":1,"t":"译文"}}]}}"""
+
+
+def translate(segments: list[Segment], backend: str = "stub", target: str = "zh",
+              chars_per_sec: float = 4.5, glossary: dict[str, str] | None = None,
+              api_base: str = "", api_key: str = "", model: str = "") -> Stats:
+    stats = Stats(segments=len(segments))
+    if not segments:
+        return stats
+
+    if backend == "stub":
+        for s in segments:
+            budget = max(4, int(s.duration * chars_per_sec))
+            s.translated = ("[译]" + s.text)[:budget]
+        stats.translated_chars = sum(len(s.translated) for s in segments)
+        return stats
+
+    api_base = (api_base or os.environ.get("DUB_LLM_BASE", "")).rstrip("/")
+    api_key = api_key or os.environ.get("DUB_LLM_KEY", "")
+    model = model or os.environ.get("DUB_LLM_MODEL", "")
+    if not api_base or not api_key or not model:
+        raise RuntimeError("缺少 LLM 配置：--api-base/--api-key/--model 或 DUB_LLM_BASE/DUB_LLM_KEY/DUB_LLM_MODEL")
+
+    import requests
+
+    for i in range(0, len(segments), 20):
+        batch = segments[i : i + 20]
+        lines = []
+        for j, s in enumerate(batch, 1):
+            budget = max(4, int(s.duration * chars_per_sec))
+            lines.append(f'{j}. (max_chars={budget}) {s.text}')
+        user = "\n".join(lines)
+        payload = {
+            "model": model,
+            "temperature": 0.3,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT.format(lang=LANG_NAMES.get(target, target))},
+                {"role": "user", "content": user},
+            ],
+        }
+        r = requests.post(f"{api_base}/chat/completions",
+                          headers={"Authorization": f"Bearer {api_key}"},
+                          json=payload, timeout=120)
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"]
+        out = _parse_lines(text)
+        for j, s in enumerate(batch, 1):
+            s.translated = out.get(j, "") or s.text
+
+    if glossary:
+        for s in segments:
+            for k, v in glossary.items():
+                s.translated = s.translated.replace(k, v)
+    stats.translated_chars = sum(len(s.translated) for s in segments)
+    return stats
+
+
+def _parse_lines(text: str) -> dict[int, str]:
+    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    try:
+        data = json.loads(text)
+        return {int(x["i"]): str(x.get("t", "")).strip() for x in data.get("lines", [])}
+    except Exception:
+        pass
+    # 退化：按 "1. xxx" 抓
+    out = {}
+    for m in re.finditer(r"^\s*(\d+)[.、)]\s*(.+)$", text, re.M):
+        out[int(m.group(1))] = m.group(2).strip()
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 5. 合成
+# --------------------------------------------------------------------------- #
+
+EDGE_VOICES = {
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "zh-male": "zh-CN-YunxiNeural",
+    "en": "en-US-AriaNeural",
+    "en-male": "en-US-GuyNeural",
+}
+
+
+def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str = "",
+        device: str = "auto", ref_wav: str = "") -> Stats:
+    os.makedirs(out_dir, exist_ok=True)
+    stats = Stats(segments=len(segments))
+    for i, s in enumerate(segments):
+        dst = os.path.join(out_dir, f"seg_{i:04d}.wav")
+        text = s.translated or s.text
+        if backend == "stub":
+            _tts_stub(text, dst, s.duration)
+        elif backend == "edge":
+            _tts_edge(text, dst, voice or EDGE_VOICES["zh"])
+        elif backend == "cosyvoice":
+            _tts_cosyvoice(text, dst, ref_wav, device)
+        else:
+            raise ValueError(f"未知 TTS backend: {backend}")
+        s.tts_path = dst
+    return stats
+
+
+def _tts_stub(text: str, dst: str, duration: float) -> None:
+    """占位音：一声轻响，用来验证时间轴，不是给人听的。"""
+    dur = max(0.4, min(duration if duration > 0 else len(text) / 4.5, 30.0))
+    n = int(dur * SR_TTS)
+    t = np.arange(n) / SR_TTS
+    tone = 0.08 * np.sin(2 * np.pi * 440 * t) * np.exp(-3 * t)
+    audio.save(dst, tone.astype(np.float32), SR_TTS)
+
+
+def _tts_edge(text: str, dst: str, voice: str) -> None:
+    import asyncio
+
+    import edge_tts
+
+    async def run():
+        await edge_tts.Communicate(text, voice).save(dst)
+
+    asyncio.run(run())
+
+
+_COSY = {}
+
+
+def _tts_cosyvoice(text: str, dst: str, ref_wav: str, device: str) -> None:
+    root = os.environ.get("DUB_COSYVOICE_DIR", "")
+    model_dir = os.environ.get("DUB_COSYVOICE_MODEL", "")
+    if not root or not model_dir:
+        raise RuntimeError("需要 DUB_COSYVOICE_DIR 与 DUB_COSYVOICE_MODEL")
+    if "m" not in _COSY:
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from cosyvoice.cli.cosyvoice import CosyVoice2
+
+        _COSY["m"] = CosyVoice2(model_dir, load_jit=False, load_trt=False, fp16=False)
+    model = _COSY["m"]
+    if not ref_wav:
+        raise RuntimeError("CosyVoice 需要 --ref-wav 作为音色参考")
+    chunks = []
+    for out in model.inference_cross_lingual(text, ref_wav, stream=False):
+        chunks.append(out["tts_speech"].squeeze(0).numpy())
+    wav = np.concatenate(chunks) if chunks else np.zeros(1, dtype=np.float32)
+    audio.save(dst, wav, model.sample_rate)
+
+
+# --------------------------------------------------------------------------- #
+# 6. 对齐 + 混音
+# --------------------------------------------------------------------------- #
+
+
+def assemble(bed_wav: str, segments: list[Segment], out_wav: str,
+             duck_db: float = -8.0, max_stretch: float = 1.25) -> Stats:
+    stats = Stats(segments=len(segments))
+    bed, sr = audio.load(bed_wav, sr=SR_MIX)
+    if bed.shape[1] == 1:
+        bed = np.repeat(bed, 2, axis=1)
+    n = len(bed)
+    dub = np.zeros((n, 2), dtype=np.float32)
+
+    for s in segments:
+        if not s.tts_path or not os.path.exists(s.tts_path):
+            continue
+        clip, csr = audio.load(s.tts_path, sr=SR_MIX, mono=False)
+        if clip.shape[1] == 1:
+            clip = np.repeat(clip, 2, axis=1)
+        target = s.duration
+        if target > 0 and len(clip) / SR_MIX > target * 1.05:
+            rate = min(max_stretch, (len(clip) / SR_MIX) / target)
+            clip = audio.time_stretch(clip, SR_MIX, rate)
+            stats.overflow += 1
+        start = int(s.start * SR_MIX)
+        audio.place_fade(dub, clip, start)
+
+    spans = [(int(s.start * SR_MIX), int(s.end * SR_MIX)) for s in segments]
+    env = audio.db_envelope(n, spans, SR_MIX, duck_db)
+    mix = bed * env[:, None] + dub
+    mix = audio.peak_normalize(mix, -1.0)
+    audio.save(out_wav, mix, SR_MIX)
+    return stats
