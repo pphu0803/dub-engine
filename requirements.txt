@@ -1,2 +1,18 @@
+# dub-engine 依赖（GPU 部分）
+#
+# torch 请按平台自装：本机是 AMD 8060S + ROCm 7.2（torch 2.10+rocm），别用 pip 默认源
+#   pip install torch --index-url https://download.pytorch.org/whl/rocm7.2  # 示例
+# demucs 建议先装好 torch 再装它，避免 pip 拉入 CUDA 版 torch 覆盖
+
 requests>=2.31
 av>=12.0
+numpy>=1.26
+scipy>=1.11
+soundfile>=0.12
+librosa>=0.10
+silero-vad>=5.1
+edge-tts>=7.3.1        # 7.2.8 会被微软端点 403
+openai-whisper>=20231117
+transformers>=4.44
+demucs>=4.0
+imageio-ffmpeg>=0.5    # ffmpeg 二进制，serve/make_clip 自动寻找

@@ -108,7 +108,7 @@ C:\code\dub\venv\Scripts\python.exe -m dub run `
 ### 第一版复现命令（中→英示例）
 
 ```powershell
-$env:DUB_LLM_BASE = "https://api.deepseek.com/v1"    # key 在 Obsidian 私钥书 deepseek 节
+$env:DUB_LLM_BASE = "https://api.deepseek.com/v1"    # 任何 OpenAI 兼容接口都行
 $env:DUB_LLM_KEY  = "sk-..."
 $env:DUB_LLM_MODEL = "deepseek-flash"
 C:\code\dub\venv\Scripts\python.exe -m dub run `
@@ -255,10 +255,3 @@ C:\code\dub\venv\Scripts\python.exe -m dub serve --port 8765
 **同步播放**：原声静音，Audio 元素播配音母版（bed+配音），play/pause/seek/倍速全跟随，漂移 >0.35s 自动校正。音频经 service worker fetch → blob URL 回传页面，绕开 https→http 混合内容限制；服务端所有响应带 CORS + PNA 头。
 
 **v1 限制**：只支持直链音轨（B 站 DASH audio m4s ✓，HLS/m3u8 未接）；音轨捕获靠点按钮后 5 秒窗口内视频正在播放；一次只跑一个 job。
-
----
-
-## 相关文档
-
-- 可行性研究：`Obsidian Vault/技术笔记/网页视频实时换语言-AI配音可行性研究-2026-10.md`
-- 架构设计 v2：`Obsidian Vault/技术笔记/网页视频AI配音-架构设计-v2-2026-10.md`
