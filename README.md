@@ -1,16 +1,16 @@
 # dub-engine
 
-网页视频 AI 配音引擎。当前进度：**音轨预取已验证 → 离线管线骨架跑通 → Demucs 在 ROCm 上跑通**。
+网页视频 AI 配音引擎。当前进度：**音轨预取已验证 → 离线管线骨架跑通 → Demucs 在 ROCm 上跑通 → 真 ASR（whisper-large-v3-turbo）跑通**。
 
 ## 现在能做什么
 
 ```
 取音轨 → 分离人声/伴奏 → 识别 → 翻译 → 合成 → 对齐混音 → 成品 wav
-  ✅        ✅ Demucs       ⏳      ⏳     ⏳        ✅
+  ✅        ✅ Demucs     ✅ GPU    ⏳      ⏳        ✅
 ```
 
-- ✅ 已跑通：音轨预取（B 站实测 54 MB / 4 s）、解码、Demucs 分离（ROCm，2× 实时）、ducking 混音、整条管线的缓存与编排。
-- ⏳ 待接：ASR（`transformers` 后端已写好，未跑真模型）、翻译（LLM 接口已写好，缺 key）、TTS（CosyVoice 适配器已写，未装模型）。
+- ✅ 已跑通：音轨预取（B 站实测 54 MB / 4 s）、解码、Demucs 分离（ROCm，2× 实时）、ducking 混音、整条管线的缓存与编排、真 ASR（GPU 2.7× 实时，峰值显存 2.2 GB）。
+- ⏳ 待接：翻译（LLM 接口已写好，缺 key）、TTS（CosyVoice 适配器已写，未装模型）。
 - 🧪 全链路可以用 `--asr stub --mt stub --tts stub` 跑通，验证时间轴和混音。
 
 ## 目录
@@ -26,6 +26,7 @@ tools/
   probe_media.py        测音轨获取速度
   decode_audio.py       媒体 → PCM
   make_clip.py          切测试素材
+  hf_fastdl.py          HF 模型并行下载（LFS 大文件走 ModelScope，见下文）
   browser/collect.js    在视频页找音轨地址
   remote/*.ps1          远程机器部署脚本
 ```
@@ -47,7 +48,7 @@ GPU   Radeon 8060S（gfx1151），ROCm 7.2，torch 可见 78.2 GB 显存
 | 用途 | 解释器 | 说明 |
 |---|---|---|
 | **主环境**（ROCm torch、numpy、soundfile、librosa、av、transformers、edge-tts） | `H:\SHARE\ComfyUI\miniconda3\envs\comfyui\python.exe` | ComfyUI 的 conda 环境，自带 ROCm 版 torch |
-| **装 demucs 的环境** | `C:\dub\venv\Scripts\python.exe` | 从上面那个 venv 出来，`--system-site-packages` 复用 torch，只多装了 demucs + einops + julius |
+| **装 demucs 的环境** | `C:\code\dub\venv\Scripts\python.exe` | 从上面那个 venv 出来，`--system-site-packages` 复用 torch，只多装了 demucs + einops + julius |
 
 ffmpeg 不在 PATH，实际在：
 
@@ -60,8 +61,8 @@ H:\SHARE\ComfyUI\miniconda3\envs\comfyui\Lib\site-packages\imageio_ffmpeg\binari
 ### 自检
 
 ```powershell
-cd C:\dub\dub-engine
-C:\dub\venv\Scripts\python.exe -m dub doctor
+cd C:\code\dub\dub-engine
+C:\code\dub\venv\Scripts\python.exe -m dub doctor
 ```
 
 期望看到：
@@ -76,28 +77,28 @@ GPU         : AMD Radeon(TM) 8060S Graphics / 78.2 GB / ROCm 7.2.0
 
 ```powershell
 # 从已下载的 B 站音轨切 120 秒
-C:\dub\venv\Scripts\python.exe tools\make_clip.py `
+C:\code\dub\venv\Scripts\python.exe tools\make_clip.py `
   --in data\upos-sz-mirrorhw.bilivideo.com_41835920.m4s `
   --out data\clip120.wav --start 60 --seconds 120
 
 # 全链路（stub 识别/翻译/合成，真分离）
-C:\dub\venv\Scripts\python.exe -m dub run `
+C:\code\dub\venv\Scripts\python.exe -m dub run `
   --input data\clip120.wav `
   --asr stub --mt stub --tts stub `
   --out out\test_sep.wav
 ```
 
-实测（2026-10-30）：
+实测（2026-10-30，120 s B 站植物纪录片片段）：
 
-| 阶段 | 耗时 |
-|---|---|
-| extract | 0.2 s |
-| **separate（Demucs, ROCm）** | **58.5 s** |
-| asr（stub） | 1.4 s |
-| tts（stub） | 0.1 s |
-| assemble | 0.4 s |
+| 阶段 | 耗时 | 备注 |
+|---|---|---|
+| extract | 0.4 s | |
+| **separate（Demucs, ROCm）** | **21–25 s** | 首跑 58 s 含模型下载与 MIOpen 预热；热缓存后 ~21 s（~5× 实时） |
+| **asr（whisper-large-v3-turbo, fp16 GPU）** | **45–57 s** | 纯推理 45 s（**2.7× 实时**），管线内首跑 57 s 含模型加载 5 s；峰值显存 **2.16 GB**（8060S 可见 84 GB，余量巨大） |
+| tts（stub） | 0.1 s | |
+| assemble | 0.3 s | |
 
-分离是当前瓶颈，**约 2× 实时**（120 秒音频 58 秒）。10 分钟视频约 5 分钟分离。
+分离热跑约 5× 实时、识别 2.7× 实时——离线配音全链路 GPU 部分合计约 1.6× 实时，10 分钟视频约 6 分钟出活。
 
 > 跑的时候会刷一屏 `MIOpen(HIP): Error ... gfx908_metadata.tn.model`。这是 ROCm 缺预编译启发式文件，不影响结果。嫌吵就设 `MIOPEN_LOG_LEVEL=3`。
 
@@ -107,12 +108,25 @@ C:\dub\venv\Scripts\python.exe -m dub run `
 
 ```powershell
 $env:HF_ENDPOINT = "https://hf-mirror.com"   # 国内加速，可选
-C:\dub\venv\Scripts\python.exe -m dub run `
+C:\code\dub\venv\Scripts\python.exe -m dub run `
   --input data\clip120.wav --asr transformers `
   --mt stub --tts stub --out out\test_asr.wav
 ```
 
-首次会下 `openai/whisper-large-v3-turbo`（约 1.6 GB）。想省显存可以改 `stages.py` 里的 `model_id` 为 `openai/whisper-small`。
+首次会下 `openai/whisper-large-v3-turbo`（约 1.6 GB）。**别用多连接并行 Range 下载 HF 大文件**——hf-mirror 对 LFS 直接 302 到 huggingface.co 的 xet CDN，实测并行分片两轮全量下载 sha256 都不匹配（坏字节），单流又只有 ~230KB/s。可靠姿势（实测 5.2MB/s，字节与 HF 逐位一致）：
+
+```powershell
+# ModelScope 国内镜像单流下载 → 校验 → 种进 HF 缓存
+curl -sL -C - -o model.safetensors --retry 8 `
+  "https://modelscope.cn/models/AI-ModelScope/whisper-large-v3-turbo/resolve/master/model.safetensors"
+# sha256 应为 542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1
+# 然后放入 %USERPROFILE%\.cache\huggingface\hub\models--openai--whisper-large-v3-turbo\
+#   blobs\<sha256> 与 snapshots\<rev>\model.safetensors（本机拷贝模式，非符号链接）
+```
+
+仓库里的 `tools\hf_fastdl.py` 是并行下载器（含分片断点续传与 X-Linked-ETag 校验参照），适合小文件/非 LFS；LFS 大文件请走上面的 ModelScope 路子。
+
+想省显存可以改 `stages.py` 里的 `model_id` 为 `openai/whisper-small`。
 
 **翻译**：任何 OpenAI 兼容接口都能接。
 
@@ -121,7 +135,7 @@ $env:DUB_LLM_BASE  = "https://api.deepseek.com/v1"
 $env:DUB_LLM_KEY   = "sk-..."
 $env:DUB_LLM_MODEL = "deepseek-chat"
 
-C:\dub\venv\Scripts\python.exe -m dub run `
+C:\code\dub\venv\Scripts\python.exe -m dub run `
   --input data\clip120.wav --asr transformers --mt llm --tts edge `
   --lang zh --out out\test_zh.wav
 ```
@@ -172,18 +186,20 @@ work/<hash>/
 1. **`torchaudio.load` 在 2.10 要 torchcodec**，所以分离阶段绕开 torchaudio，改走 soundfile。别改回去。
 2. **MIOpen 报错刷屏**：ROCm 缺 gfx908 启发式文件，纯噪音。`MIOPEN_LOG_LEVEL=3` 可压。
 3. **`faster-whisper` 在 AMD 上没 GPU 加速**，只能 CPU；GPU 走 `transformers`。
-4. **分离是瓶颈**：2× 实时。想快可以换 `htdemucs_ft`（更慢更好）或降 `segment`，或接受它。
+4. **transformers 后端的 ASR 没有 VAD**：安静段/纯音乐段会出现幻觉循环（实测 120s 片段里"森林肯定的"重复三遍）；两次运行分段数还会漂（19 → 12 → 13 段）。faster-whisper 的 `vad_filter=True` 没法直接搬，要 VAD 得自己接（silero-vad 之类）或等接 diarization 时一起做。
 5. **还没做说话人分离（diarization）**，所有台词用同一个音色。这是下一步。
+6. ~~缓存判断 bug~~（已修 2026-10-30）：`_need("mix")` 查的是 `mix` 不是 `mix.wav`，导致缓存永远 miss、每次全量重跑。现已用 `CACHE_FILES` 短名映射表修正。
 
 ---
 
 ## 下一步（按优先级）
 
-1. **跑通真 ASR**：`--asr transformers` 测 120 秒，记录耗时和显存。这一步决定 Whisper 在 8060S 上能不能用。
+1. ~~**跑通真 ASR**~~：✅ 2026-10-30 完成。whisper-large-v3-turbo 在 8060S 上 2.7× 实时、峰值显存 2.16 GB——完全可用，还剩 80 GB 显存余量给 TTS/diarization 同驻。
 2. **接 TTS**：先 `edge` 验证全链路听感，再决定装 CosyVoice 3 还是 IndexTTS-2.5。
-3. **加 diarization**：`pyannote` 或 `3D-Speaker`，把角色分开，每个角色一个参考音色。
-4. **音色距离约束**：见 v2 架构文档第 2.4 节，解决"两个角色声音太像"。
-5. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
+3. **加 VAD / 幻觉抑制**：见已知问题 4；可与 diarization 合并做。
+4. **加 diarization**：`pyannote` 或 `3D-Speaker`，把角色分开，每个角色一个参考音色。
+5. **音色距离约束**：见 v2 架构文档第 2.4 节，解决"两个角色声音太像"。
+6. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
 
 ## 相关文档
 
