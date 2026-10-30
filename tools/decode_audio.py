@@ -23,6 +23,12 @@ import wave
 
 import av
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def decode(src: str, dst: str, rate: int, channels: int) -> dict:
     info = {"src": src, "dst": dst, "rate": rate, "duration_s": 0.0,
@@ -76,11 +82,17 @@ def decode(src: str, dst: str, rate: int, channels: int) -> dict:
         if frame_db < -50:
             silent_frames += 1
 
-    for frame in container.decode(stream):
-        for f in resampler.resample(frame):
-            handle(f)
-        for pkt in ost.encode(f):
-            out.mux(pkt)
+    decode_error = ""
+    try:
+        for frame in container.decode(stream):
+            for f in resampler.resample(frame):
+                handle(f)
+            for pkt in ost.encode(f):
+                out.mux(pkt)
+    except Exception as exc:  # noqa: BLE001
+        # 分片被截断（预取限速）时，最后几个 packet 一定不完整。
+        # 已经解出来的部分仍然有效，保留并继续收尾。
+        decode_error = f"{type(exc).__name__}: {exc}"
     for f in resampler.resample(None):
         handle(f)
 
@@ -102,6 +114,9 @@ def decode(src: str, dst: str, rate: int, channels: int) -> dict:
         info["rms_dbfs"] = 20 * math.log10(rms) if rms > 0 else float("-inf")
         info["peak_dbfs"] = 20 * math.log10(peak / 32768.0) if peak > 0 else float("-inf")
         info["silence_ratio"] = silent_frames / total_frames if total_frames else 0.0
+    if decode_error:
+        info["decode_error"] = decode_error
+        info["truncated"] = True
     info["frames"] = frame_count
     return info
 
@@ -131,8 +146,10 @@ def main(argv=None) -> int:
     print(f"峰值      : {info['peak_dbfs']:.1f} dBFS")
     print(f"静音帧占比 : {info['silence_ratio']*100:.1f}%（帧级，<-50 dBFS）")
     print("=" * 56)
+    if info.get("truncated"):
+        print(f"[warn] 输入末尾被截断，已保留可解码部分：{info.get('decode_error','')[:80]}")
     if info["rms_dbfs"] < -50:
-        print("⚠ 电平过低，可能下到的是静音或未解密的流", file=sys.stderr)
+        print("[warn] 电平过低，可能下到的是静音或未解密的流", file=sys.stderr)
         return 3
     return 0
 

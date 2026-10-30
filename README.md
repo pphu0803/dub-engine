@@ -52,8 +52,41 @@ python tools/decode_audio.py --in data\xxx.m4s
 | test-streams.mux.dev | HLS | 最低码率变体（含视频） | — | 128× | 4.7 s |
 | Apple bipbop fmp4 | HLS + BYTERANGE | 音频轨 English 2ch | 89 kbps | 107× | 5.6 s |
 | Unified Streaming | DASH | audio AdaptationSet | ~66 kbps | 30× | 20 s |
+| **B 站 BV1Qy4y1M7ep** | DASH 直链 | 30232 / 133 kbps | 133 kbps | **~670×** | 本地 8.5 s / rog 4 s |
 
 结论：**音轨本身的体积很小（10 分钟 60–90 kbps 约 5–10 MB），瓶颈从来不是带宽，是能不能拿到地址。**
+
+B 站这条是 54 分钟的片子，音轨 54.3 MB，本机 6.4 MB/s、rog-windows 13.7 MB/s。`__playinfo__` 里直接给了完整 `.m4s` 直链，不需要 MSE hook，属于最理想的"路径 A"。
+
+## 远程机器：rog-windows
+
+```
+CPU   AMD Ryzen AI MAX+ 395 (16C/32T, Zen5)
+RAM   123.6 GB 统一内存
+GPU   Radeon 8060S（核显，无 CUDA / 无 ROCm）
+OS    Windows 11 26300
+```
+
+环境装在 `C:\dub\python`（用户级，不动 PATH）。首次部署：
+
+```powershell
+# 本地：打 bundle 并推过去
+git bundle create .tmp\dub.bundle --all
+scp .tmp\dub.bundle rog-windows:C:/dub/dub.bundle
+ssh rog-windows "git clone C:\dub\dub.bundle C:\dub\dub-engine"
+
+# 装 Python + 依赖
+scp tools\remote\bootstrap.ps1 rog-windows:C:/dub/bootstrap.ps1
+ssh rog-windows "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dub\bootstrap.ps1"
+```
+
+跑命令：
+
+```powershell
+ssh rog-windows "Set-Location C:\dub\dub-engine; C:\dub\python\python.exe tools\probe_media.py --url <...>"
+```
+
+注意：远端默认 shell 是 PowerShell，`if exist` 这类 cmd 语法会挂；跨引号的复杂命令建议写成 `.ps1` 再 `-File` 执行。
 
 ## 踩过的坑
 
