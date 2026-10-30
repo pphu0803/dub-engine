@@ -33,17 +33,18 @@ def resample(data: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     if src_sr == dst_sr:
         return data
     try:
-        import librosa
-
-        chans = [librosa.resample(data[:, c], orig_sr=src_sr, target_sr=dst_sr) for c in range(data.shape[1])]
-        n = min(len(c) for c in chans)
-        return np.stack([c[:n] for c in chans], axis=1).astype(np.float32)
-    except Exception:
+        # scipy 的 polyphase 比 librosa 的 soxr 路径在长音频上快一个量级
         from scipy.signal import resample_poly
 
         g = gcd(int(src_sr), int(dst_sr))
         up, down = int(dst_sr) // g, int(src_sr) // g
         chans = [resample_poly(data[:, c], up, down) for c in range(data.shape[1])]
+        n = min(len(c) for c in chans)
+        return np.stack([c[:n] for c in chans], axis=1).astype(np.float32)
+    except Exception:
+        import librosa
+
+        chans = [librosa.resample(data[:, c], orig_sr=src_sr, target_sr=dst_sr) for c in range(data.shape[1])]
         n = min(len(c) for c in chans)
         return np.stack([c[:n] for c in chans], axis=1).astype(np.float32)
 

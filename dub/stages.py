@@ -94,15 +94,14 @@ def extract_audio(src: str, dst: str, sr: int = SR_MIX, channels: int = 2) -> fl
 def separate(mix_wav: str, out_dir: str, device: str = "cuda", model_name: str = "htdemucs") -> tuple[str, str]:
     """返回 (vocals_path, bed_path)。失败则抛异常，由调用方决定是否 duck 兜底。"""
     import torch
-    import torchaudio
     from demucs.apply import apply_model
     from demucs.pretrained import get_model
 
-    wav, sr = torchaudio.load(mix_wav)
-    if sr != SR_MIX:
-        wav = torchaudio.functional.resample(wav, sr, SR_MIX)
-    if wav.shape[0] == 1:
-        wav = wav.repeat(2, 1)
+    # 不用 torchaudio.load：2.10 起它依赖 torchcodec，而我们手里本来就是 wav
+    data, sr = audio.load(mix_wav, sr=SR_MIX)
+    if data.shape[1] == 1:
+        data = np.repeat(data, 2, axis=1)
+    wav = torch.from_numpy(data.T.copy())  # (ch, n)
 
     model = get_model(model_name)
     model.eval()
@@ -118,13 +117,13 @@ def separate(mix_wav: str, out_dir: str, device: str = "cuda", model_name: str =
     if "vocals" not in names:
         raise RuntimeError(f"模型 {model_name} 没有 vocals 轨：{names}")
     vi = names.index("vocals")
-    vocals = sources[vi]
-    bed = sources[[i for i in range(len(names)) if i != vi]].sum(0)
+    vocals = sources[vi].cpu().numpy().T
+    bed = sources[[i for i in range(len(names)) if i != vi]].sum(0).cpu().numpy().T
 
     vpath = os.path.join(out_dir, "vocals.wav")
     bpath = os.path.join(out_dir, "bed.wav")
-    torchaudio.save(vpath, vocals.cpu(), SR_MIX)
-    torchaudio.save(bpath, bed.cpu().clamp(-1, 1), SR_MIX)
+    audio.save(vpath, vocals, SR_MIX)
+    audio.save(bpath, bed, SR_MIX)
     return vpath, bpath
 
 
