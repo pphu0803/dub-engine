@@ -12,6 +12,17 @@ from . import audio, stages
 from .stages import Segment, Stats
 
 
+# --force 与缓存判断用的短名 → 实际落盘文件名
+CACHE_FILES = {
+    "mix": "mix.wav",
+    "bed": "bed.wav",   # vocals.wav 随 bed 一起生成
+    "asr": "asr.json",
+    "trans": "trans.json",
+    "tts": "tts",       # 目录
+    "final": "final.wav",
+}
+
+
 @dataclass
 class Options:
     input: str
@@ -75,7 +86,8 @@ class Runner:
         return os.path.join(self.work, name)
 
     def _need(self, name: str) -> bool:
-        return name in self.o.force or not os.path.exists(self._path(name))
+        path = self._path(CACHE_FILES.get(name, name))
+        return name in self.o.force or not os.path.exists(path)
 
     # ------------------------------------------------------------------ #
 
