@@ -160,7 +160,7 @@ class Runner:
                 "tts",
                 lambda: stages.tts(
                     segs, d, backend=self.o.tts_backend, voice=self.o.voice,
-                    device=self.o.device, ref_wav=self.o.ref_wav,
+                    device=self.o.device, ref_wav=self.o.ref_wav, lang=self.o.lang,
                 ),
             )
         else:

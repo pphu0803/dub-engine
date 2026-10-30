@@ -35,6 +35,7 @@ class Segment:
     text: str = ""
     translated: str = ""
     tts_path: str = ""
+    speaker: int = 0
 
     @property
     def duration(self) -> float:
@@ -47,11 +48,13 @@ class Segment:
             "text": self.text,
             "translated": self.translated,
             "tts_path": self.tts_path,
+            "speaker": self.speaker,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Segment":
-        return cls(d["start"], d["end"], d.get("text", ""), d.get("translated", ""), d.get("tts_path", ""))
+        return cls(d["start"], d["end"], d.get("text", ""), d.get("translated", ""),
+                   d.get("tts_path", ""), d.get("speaker", 0))
 
 
 @dataclass
@@ -157,14 +160,29 @@ def asr(path: str, backend: str = "auto", model: str = "large-v3-turbo",
         return out
     if backend in ("auto", "faster"):
         try:
-            return _filter_hallucinations(_asr_faster(path, model, language, device))
+            segs = _filter_hallucinations(_asr_faster(path, model, language, device))
+            return _diarize_safe(path, segs)
         except Exception as exc:
             if backend == "faster":
                 raise
             print(f"[warn] faster-whisper 不可用（{exc}），改用 transformers", file=sys.stderr)
     if backend in ("auto", "transformers"):
-        return _filter_hallucinations(_asr_transformers(path, language, device))
+        segs = _filter_hallucinations(_asr_transformers(path, language, device))
+        return _diarize_safe(path, segs)
     raise ValueError(f"未知 ASR backend: {backend}")
+
+
+def _diarize_safe(path: str, segs: list[Segment]) -> list[Segment]:
+    """diarize 失败不毁管线：全标 0 继续走（所有台词同一音色）。"""
+    try:
+        from .diarize import diarize
+
+        return diarize(path, segs)
+    except Exception as exc:
+        print(f"[warn] diarize 失败（{type(exc).__name__}: {exc}），全部标为说话人 0", file=sys.stderr)
+        for s in segs:
+            s.speaker = 0
+        return segs
 
 
 def _asr_faster(path: str, model: str, language: str | None, device: str) -> list[Segment]:
@@ -214,41 +232,60 @@ def _grams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
-def _tokens(text: str) -> set[str]:
-    """实词 token：英文词（≥3 字符）+ 中文 bigram。用于跨段串检测。"""
-    import re
-
-    words = set(re.findall(r"[a-z]{3,}", text.lower()))
-    return words | {g for g in _grams(text) if re.search(r"[\u4e00-\u9fff]", g)}
-
-
 def _filter_hallucinations(segs: list[Segment]) -> list[Segment]:
-    """幻觉过滤。R1：自身循环（同 bigram/词反复）；R2：连续 ≥3 段共享同一实词
-    且每段都短（≤10 词）→ 幻觉串整串丢弃。真解说段偶有同主题连段，但通常
-    段更长、不会每段都共享同一实词。"""
-    texts = [s.text for s in segs]
-    toks = [_tokens(t) for t in texts]
-    nwords = [len(t.split()) or len(t) // 2 for t in texts]
+    """幻觉过滤。R1：自身循环（同 bigram/词反复）。
+    R2：相邻段 bigram Jaccard ≥ 0.55 连成串、串长 ≥3 → 幻觉串整串丢弃
+    （幻觉串的特征是段段雷同，不是共享某个实词——中文真解说会高频复现
+    "植物"这类主题词，按共享词判会误杀）。"""
+    grams = [_grams(s.text) for s in segs]
     kill = set()
 
-    for i in range(len(segs)):
-        if i in kill:
-            continue
+    def near(a: set, b: set) -> float:
+        """包含率：短 bigram 集合被长集合吃掉的比例。幻觉串段段同源，
+        短段基本是长段的子集；真解说相邻段内容不同，交集很小。"""
+        return len(a & b) / min(len(a), len(b)) if a and b else 0.0
+
+    i = 0
+    while i < len(segs):
         j = i
-        common = toks[i]
-        while j + 1 < len(segs) and nwords[j + 1] <= 10:
-            nxt = common & toks[j + 1]
-            if not nxt:
-                break
-            common = nxt
+        while j + 1 < len(segs) and near(grams[j], grams[j + 1]) >= 0.5:
             j += 1
-        if j - i + 1 >= 3 and nwords[i] <= 10:
+        if j - i + 1 >= 3:
             kill.update(range(i, j + 1))
+        i = j + 1
 
     out = [s for k, s in enumerate(segs) if k not in kill and not _is_loopy(s.text)]
     dropped = len(segs) - len(out)
     if dropped:
         print(f"    [asr] 丢弃幻觉段 {dropped}/{len(segs)}")
+    return out
+
+
+def vad_regions(data16k: np.ndarray, sr: int = 16000, pad_ms: int = 150,
+                min_speech_ms: int = 300, min_silence_ms: int = 350,
+                merge_gap: float = 2.0, min_region: float = 1.2) -> list[tuple[float, float]]:
+    """silero VAD 切语音区。返回 [(start_s, end_s)]。模型随 pip 包内置，离线。
+
+    merge_gap：相邻区间隙小于它就并成一个区（whisper 区内自己分段，区太碎
+    窗口装不下配音）；min_region：孤立短区直接丢（拟声/背景音）。
+    """
+    from silero_vad import get_speech_timestamps, load_silero_vad
+
+    model = load_silero_vad()
+    ts = get_speech_timestamps(
+        data16k, model, sampling_rate=sr,
+        min_speech_duration_ms=min_speech_ms, min_silence_duration_ms=min_silence_ms,
+        speech_pad_ms=pad_ms,
+    )
+    regions = [(x["start"] / sr, x["end"] / sr) for x in ts]
+
+    merged: list[list[float]] = []
+    for a, b in regions:
+        if merged and a - merged[-1][1] <= merge_gap:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    out = [(a, b) for a, b in merged if b - a >= min_region or len(merged) == 1]
     return out
 
 
@@ -261,20 +298,34 @@ def _asr_transformers(path: str, language: str | None, device: str) -> list[Segm
     pipe = pipeline("automatic-speech-recognition", model=model_id, device=dev,
                     torch_dtype=torch.float16 if dev == 0 else torch.float32)
     data, sr = audio.load(path, sr=16000, mono=True)
+    regions = vad_regions(data[:, 0])
+    print(f"    [vad] 语音区 {len(regions)} 个，共 {sum(b-a for a, b in regions):.1f}s / {len(data)/sr:.0f}s")
     kwargs = {"return_timestamps": True}
     if language:
         kwargs["generate_kwargs"] = {"language": language}
-    out = pipe({"array": data[:, 0], "sampling_rate": 16000}, **kwargs)
-    chunks = out.get("chunks") or []
     segs = []
-    for c in chunks:
-        ts = c.get("timestamp") or (0, 0)
-        if ts[0] is None or ts[1] is None:
+    for a, b in regions:
+        clip = data[int(a * sr):int(b * sr), 0]
+        if len(clip) < int(1.2 * sr):
             continue
-        txt = (c.get("text") or "").strip()
-        if txt:
-            segs.append(Segment(float(ts[0]), float(ts[1]), txt))
-    return segs
+        out = pipe({"array": clip, "sampling_rate": sr}, **kwargs)
+        for c in out.get("chunks") or []:
+            ts = c.get("timestamp") or (0, 0)
+            if ts[0] is None or ts[1] is None:
+                continue
+            txt = (c.get("text") or "").strip()
+            if txt:
+                segs.append(Segment(a + float(ts[0]), a + float(ts[1]), txt))
+
+    # 间隙小于 0.35s 的相邻段合并：whisper 常把一句拆成碎窗，碎窗装不下配音
+    merged: list[Segment] = []
+    for s in segs:
+        if merged and s.start - merged[-1].end <= 0.35:
+            merged[-1].end = s.end
+            merged[-1].text = merged[-1].text.rstrip("，。,. ") + " " + s.text.lstrip("，。,. ")
+        else:
+            merged.append(s)
+    return merged
 
 
 # --------------------------------------------------------------------------- #
@@ -370,18 +421,25 @@ EDGE_VOICES = {
     "en-male": "en-US-GuyNeural",
 }
 
+# 说话人 → 音色池（diarize 出的 speaker 序号索引）；--voice 显式给则全程单音色
+EDGE_SPEAKER_VOICES = {
+    "zh": ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunyangNeural"],
+    "en": ["en-US-AriaNeural", "en-US-GuyNeural", "en-US-MichelleNeural", "en-US-RogerNeural"],
+}
+
 
 def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str = "",
-        device: str = "auto", ref_wav: str = "") -> Stats:
+        device: str = "auto", ref_wav: str = "", lang: str = "zh") -> Stats:
     os.makedirs(out_dir, exist_ok=True)
     stats = Stats(segments=len(segments))
+    pool = EDGE_SPEAKER_VOICES.get(lang, EDGE_SPEAKER_VOICES["zh"])
     for i, s in enumerate(segments):
         dst = os.path.join(out_dir, f"seg_{i:04d}.wav")
         text = s.translated or s.text
         if backend == "stub":
             _tts_stub(text, dst, s.duration)
         elif backend == "edge":
-            _tts_edge(text, dst, voice or EDGE_VOICES["zh"])
+            _tts_edge(text, dst, voice or pool[s.speaker % len(pool)])
         elif backend == "cosyvoice":
             _tts_cosyvoice(text, dst, ref_wav, device)
         else:
@@ -407,7 +465,16 @@ def _tts_edge(text: str, dst: str, voice: str) -> None:
     async def run():
         await edge_tts.Communicate(text, voice).save(dst)
 
-    asyncio.run(run())
+    # 微软端点偶发 403/断连，重试三次基本必过
+    for attempt in range(3):
+        try:
+            asyncio.run(run())
+            return
+        except Exception as exc:
+            if attempt == 2:
+                raise
+            print(f"    [tts] edge 重试 {attempt + 1}/3：{type(exc).__name__}", flush=True)
+            time.sleep(1.5 * (attempt + 1))
 
 
 _COSY = {}

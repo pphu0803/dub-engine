@@ -1,16 +1,16 @@
 # dub-engine
 
-网页视频 AI 配音引擎。当前进度：**第一版全链路跑通（2026-10-30）**——真分离 + 真 ASR + 真 LLM 翻译 + 真 TTS + 混音，成品可听。
+网页视频 AI 配音引擎。当前进度：**v3（2026-10-30）**——全链路 + VAD + 说话人分离 + 多音色配音，成品可听。
 
 ## 现在能做什么
 
 ```
-取音轨 → 分离人声/伴奏 → 识别 → 翻译 → 合成 → 对齐混音 → 成品 wav
-  ✅        ✅ Demucs     ✅ GPU   ✅ LLM   ✅ edge     ✅
+取音轨 → 分离 → VAD切区 → 识别+幻觉过滤+diarize → LLM翻译 → 多音色TTS → 混音
+  ✅      ✅      ✅            ✅                    ✅        ✅       ✅
 ```
 
-- ✅ 全链路实测（120 s B 站植物纪录片，中→英）：`out/first_v1.wav`，11 段真配音，幻觉段已滤，overflow 2/11（1.25× 内压回），GPU 段合计约 1.6× 实时。
-- CosyVoice（音色克隆）适配器已写，模型未装——第二版的事。
+- ✅ v3 实测（120 s B 站纪录片，中英混说→英）：`out/first_v3.wav`，**2 说话人自动分音色**（中文解说员→Aria 女声，英文出镜嘉宾→Guy 男声），7 段 overflow 0。
+- CosyVoice（音色克隆）适配器已写，模型未装——下一步的事。
 - 🧪 全链路可以用 `--asr stub --mt stub --tts stub` 跑通，验证时间轴和混音。
 
 ## 目录
@@ -18,10 +18,14 @@
 ```
 dub/
   pipeline.py   编排 + 缓存（按输入哈希分目录，哪步坏了只重跑那步）
-  stages.py     extract / separate / asr / translate / tts / assemble
+  stages.py     extract / separate / asr+VAD+幻觉过滤 / translate / tts / assemble
+  diarize.py    CAM++ 嵌入 + 层次聚类 → speaker 标签
+  campplus.py   CAM++ 网络定义（vendor 自 3D-Speaker，Apache-2.0）
   audio.py      读写、重采样、time-stretch、ducking 包络
   doctor.py     环境自检
   cli.py        命令行
+models/
+  campplus_cn_common.bin   CAM++ 权重（ModelScope，不入库）
 tools/
   probe_media.py        测音轨获取速度
   decode_audio.py       媒体 → PCM
@@ -109,12 +113,13 @@ $env:DUB_LLM_KEY  = "sk-..."
 $env:DUB_LLM_MODEL = "deepseek-flash"
 C:\code\dub\venv\Scripts\python.exe -m dub run `
   --input data\clip120.wav --asr transformers --mt llm --tts edge `
-  --lang en --voice en-US-AriaNeural --chars-per-sec 12 `
-  --out out\first_v1.wav
+  --lang en --chars-per-sec 12 `
+  --out out\first_v3.wav
 ```
 
-- **`--chars-per-sec` 按目标语言调**：中文 4.5（默认），英文 12——预算直接进翻译 prompt，调对了 overflow 才低（本例 2/11）。
-- edge 音色要显式给 `--voice`：`_tts_edge` 的默认值是中文音色，不看 `--lang`。
+- **不带 `--voice` = 多音色模式**：diarize 的说话人序号索引 `EDGE_SPEAKER_VOICES[lang]` 音色池；显式给 `--voice` 则全程单音色。**注意 `--voice` 参与缓存 key**：带不带会落到不同 work 目录。
+- **`--chars-per-sec` 按目标语言调**：中文 4.5（默认），英文 12——预算直接进翻译 prompt，调对了 overflow 才低。
+- `--force` 少写哪步哪步不重做（如上游 asr 变了要 `--force trans,tts,final`）。
 
 > 跑的时候会刷一屏 `MIOpen(HIP): Error ... gfx908_metadata.tn.model`。这是 ROCm 缺预编译启发式文件，不影响结果。嫌吵就设 `MIOPEN_LOG_LEVEL=3`。
 
@@ -202,19 +207,20 @@ work/<hash>/
 1. **`torchaudio.load` 在 2.10 要 torchcodec**，所以分离阶段绕开 torchaudio，改走 soundfile。别改回去。
 2. **MIOpen 报错刷屏**：ROCm 缺 gfx908 启发式文件，纯噪音。`MIOPEN_LOG_LEVEL=3` 可压。
 3. **`faster-whisper` 在 AMD 上没 GPU 加速**，只能 CPU；GPU 走 `transformers`。
-4. **transformers 后端的 ASR 没有 VAD**：配乐吟唱段会出幻觉循环（实测 59–82s 段"森林肯定的"×N → "sure, sure, sure"）。**已加启发式过滤**（`_filter_hallucinations`：自身循环 + 连续 ≥3 段共享实词且每段 ≤10 词的幻觉串整串丢弃；能量门限无效——demucs 把吟唱分进人声轨，响度与真解说相当）。**非循环幻觉（"谢谢观看"类）仍会漏**，根治要 VAD，与 diarization 一起做。分段数两次运行会漂（19→12→18），属 whisper 长音频常态。
-5. **edge-tts 必须 ≥7.3.1**：conda 里自带的 7.2.8 连微软 WebSocket 直接 403（Sec-MS-GEC 校验变了）。已在 venv 内升级遮蔽，不动 conda 基座。偶发瞬时 403 重试即可。
-6. **还没做说话人分离（diarization）**，所有台词用同一个音色。这是下一步。
-7. ~~缓存判断 bug~~（已修 2026-10-30）：`_need("mix")` 查的是 `mix` 不是 `mix.wav`，导致缓存永远 miss、每次全量重跑。现已用 `CACHE_FILES` 短名映射表修正。另注意 `--force` 不含 `final` 时，上游变了混音不会重做。
+4. **ASR 稳定性三连**：① 配乐吟唱段的幻觉循环已由 VAD 切区 + 文本过滤双保险治理（VAD 本身救不了哼唱——silero 判其为人声，能量也不低，只能靠文本信号）；② **whisper 中文繁简摇摆**——同一段音频三次运行三种繁简度（"极端恶劣"→"極端惡劣"），想稳定给 `--source-lang zh`；③ VAD 边缘区摇摆（语音总长 73.9~76.9s 漂），分段数随之漂。全轨长音频模式在混语料上会**把英文解说转成中文循环幻觉**——VAD 逐区转写后该段转出流利英文（这就是 v1"误杀 23s 真解说"的真相）。
+5. **edge-tts 必须 ≥7.3.1**：conda 里自带的 7.2.8 连微软 WebSocket 直接 403（Sec-MS-GEC 校验变了）。已在 venv 内升级遮蔽，不动 conda 基座。**偶发瞬时 403 已加重试（3 次退避）**。
+6. **conda 的 modelscope 包是残缺的**（缺 addict/datasets 一串依赖，装齐要拉全家桶）——别用。CAM++ 走 vendor 路线：`dub/campplus.py`（网络定义）+ `models/campplus_cn_common.bin`（28MB，ModelScope 直下 13MB/s）。前处理 = torchaudio kaldi fbank + 句级均值归一（**fbank 输入要 2D**，1D 会 IndexError）；`CAMPPlus(embedding_size=192)`（默认 512 会对不上权重）。正确性用官方 example 验过：同说话人 cos 0.69 / 异 -0.08。
+7. **还没做说话人级别的音色克隆**：diarize 只到"说话人序号 → 音色池索引"，克隆（每角色一个参考音色）等 CosyVoice/IndexTTS 接入。
+8. ~~缓存判断 bug~~（已修 2026-10-30）：`_need("mix")` 查的是 `mix` 不是 `mix.wav`，导致缓存永远 miss、每次全量重跑。现已用 `CACHE_FILES` 短名映射表修正。另注意 `--force` 不含 `final` 时，上游变了混音不会重做。
 
 ---
 
 ## 下一步（按优先级）
 
 1. ~~跑通真 ASR~~：✅ 2026-10-30。
-2. ~~全链路第一版（ASR + LLM 翻译 + edge TTS + 混音）~~：✅ 2026-10-30，`out/first_v1.wav`（中→英 120s）。
-3. **加 diarization + VAD**：`pyannote` 或 `3D-Speaker` 分角色；顺带根治非循环幻觉（已知问题 4）。
-4. **音色克隆 TTS 选型**：CosyVoice 3 vs IndexTTS-2.5（`--ref-wav` 通道已留好）。
+2. ~~全链路第一版~~：✅ 2026-10-30。
+3. ~~diarization + VAD~~：✅ 2026-10-30——silero VAD 切区（幻觉根治 + 时间轴贴语音）+ CAM++ 嵌入聚类（说话人 → 音色池自动分声）。
+4. **音色克隆 TTS 选型**：CosyVoice 3 vs IndexTTS-2.5（`--ref-wav` 通道已留好）；配合 diarize 每角色一个参考音色。
 5. **音色距离约束**：见 v2 架构文档第 2.4 节，解决"两个角色声音太像"。
 6. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
 
