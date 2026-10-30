@@ -7,6 +7,7 @@
 ```
 tools/
 ├── probe_media.py        # 测音轨获取速度（HLS / DASH / 直链）
+├── decode_audio.py       # 媒体 → 16k/24k 单声道 wav（不依赖系统 ffmpeg）
 └── browser/collect.js    # 在视频页面里找出音轨地址（粘贴到 DevTools Console）
 ```
 
@@ -36,6 +37,14 @@ python tools/probe_media.py --url "<上一步的地址>" --referer "<视频页�
 
 `倍率` 是"每 1 秒真实时间能拿多少秒媒体"。**只要 > 10×，预取架构就成立**；< 2× 就只能退回实时捕获。
 
+### 4. 转成 ASR 能吃的 PCM
+
+```powershell
+python tools/decode_audio.py --in data\xxx.m4s
+```
+
+默认输出 16 kHz 单声道（ASR 用），`--rate 24000` 给 TTS 做参考音。会报 RMS、峰值和帧级静音占比——下到静音流时能立刻发现。
+
 ## 已实测（2026-10-30）
 
 | 源 | 类型 | 选中 | 码率 | 倍率 | 10 min 耗时 |
@@ -53,6 +62,8 @@ python tools/probe_media.py --url "<上一步的地址>" --referer "<视频页�
 **限速按批提交**：8 个并发一起发出去，上限会超出约一个批次（6 MB 限制实测落到 6.7 MB）。可以接受，但报告里要说明。
 
 **DASH 的覆盖**：目前支持 `SegmentTemplate`（`$Number$` / `SegmentTimeline`）和 `SegmentList`；`SegmentBase` + `indexRange` 的单文件写法还没做，遇到会报"未解析出分片"。
+
+**测试流本身大段静音**：Apple bipbop 是测试图样，帧级静音占比 95% 是正常的，不是解码坏了。拿真实内容测才准。
 
 ## 这条路线的边界
 
