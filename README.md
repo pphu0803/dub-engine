@@ -1,16 +1,16 @@
 # dub-engine
 
-网页视频 AI 配音引擎。当前进度：**音轨预取已验证 → 离线管线骨架跑通 → Demucs 在 ROCm 上跑通 → 真 ASR（whisper-large-v3-turbo）跑通**。
+网页视频 AI 配音引擎。当前进度：**第一版全链路跑通（2026-10-30）**——真分离 + 真 ASR + 真 LLM 翻译 + 真 TTS + 混音，成品可听。
 
 ## 现在能做什么
 
 ```
 取音轨 → 分离人声/伴奏 → 识别 → 翻译 → 合成 → 对齐混音 → 成品 wav
-  ✅        ✅ Demucs     ✅ GPU    ⏳      ⏳        ✅
+  ✅        ✅ Demucs     ✅ GPU   ✅ LLM   ✅ edge     ✅
 ```
 
-- ✅ 已跑通：音轨预取（B 站实测 54 MB / 4 s）、解码、Demucs 分离（ROCm，2× 实时）、ducking 混音、整条管线的缓存与编排、真 ASR（GPU 2.7× 实时，峰值显存 2.2 GB）。
-- ⏳ 待接：翻译（LLM 接口已写好，缺 key）、TTS（CosyVoice 适配器已写，未装模型）。
+- ✅ 全链路实测（120 s B 站植物纪录片，中→英）：`out/first_v1.wav`，11 段真配音，幻觉段已滤，overflow 2/11（1.25× 内压回），GPU 段合计约 1.6× 实时。
+- CosyVoice（音色克隆）适配器已写，模型未装——第二版的事。
 - 🧪 全链路可以用 `--asr stub --mt stub --tts stub` 跑通，验证时间轴和混音。
 
 ## 目录
@@ -95,10 +95,26 @@ C:\code\dub\venv\Scripts\python.exe -m dub run `
 | extract | 0.4 s | |
 | **separate（Demucs, ROCm）** | **21–25 s** | 首跑 58 s 含模型下载与 MIOpen 预热；热缓存后 ~21 s（~5× 实时） |
 | **asr（whisper-large-v3-turbo, fp16 GPU）** | **45–57 s** | 纯推理 45 s（**2.7× 实时**），管线内首跑 57 s 含模型加载 5 s；峰值显存 **2.16 GB**（8060S 可见 84 GB，余量巨大） |
-| tts（stub） | 0.1 s | |
-| assemble | 0.3 s | |
+| translate（deepseek-flash） | 9.3 s | 11 段一次 API 调用；译文按窗口字数预算压缩，质量自然 |
+| tts（edge, Aria） | 22.3 s | 11 段串行 WebSocket |
+| assemble | 1.4 s | |
 
 分离热跑约 5× 实时、识别 2.7× 实时——离线配音全链路 GPU 部分合计约 1.6× 实时，10 分钟视频约 6 分钟出活。
+
+### 第一版复现命令（中→英示例）
+
+```powershell
+$env:DUB_LLM_BASE = "https://api.deepseek.com/v1"    # key 在 Obsidian 私钥书 deepseek 节
+$env:DUB_LLM_KEY  = "sk-..."
+$env:DUB_LLM_MODEL = "deepseek-flash"
+C:\code\dub\venv\Scripts\python.exe -m dub run `
+  --input data\clip120.wav --asr transformers --mt llm --tts edge `
+  --lang en --voice en-US-AriaNeural --chars-per-sec 12 `
+  --out out\first_v1.wav
+```
+
+- **`--chars-per-sec` 按目标语言调**：中文 4.5（默认），英文 12——预算直接进翻译 prompt，调对了 overflow 才低（本例 2/11）。
+- edge 音色要显式给 `--voice`：`_tts_edge` 的默认值是中文音色，不看 `--lang`。
 
 > 跑的时候会刷一屏 `MIOpen(HIP): Error ... gfx908_metadata.tn.model`。这是 ROCm 缺预编译启发式文件，不影响结果。嫌吵就设 `MIOPEN_LOG_LEVEL=3`。
 
@@ -186,18 +202,19 @@ work/<hash>/
 1. **`torchaudio.load` 在 2.10 要 torchcodec**，所以分离阶段绕开 torchaudio，改走 soundfile。别改回去。
 2. **MIOpen 报错刷屏**：ROCm 缺 gfx908 启发式文件，纯噪音。`MIOPEN_LOG_LEVEL=3` 可压。
 3. **`faster-whisper` 在 AMD 上没 GPU 加速**，只能 CPU；GPU 走 `transformers`。
-4. **transformers 后端的 ASR 没有 VAD**：安静段/纯音乐段会出现幻觉循环（实测 120s 片段里"森林肯定的"重复三遍）；两次运行分段数还会漂（19 → 12 → 13 段）。faster-whisper 的 `vad_filter=True` 没法直接搬，要 VAD 得自己接（silero-vad 之类）或等接 diarization 时一起做。
-5. **还没做说话人分离（diarization）**，所有台词用同一个音色。这是下一步。
-6. ~~缓存判断 bug~~（已修 2026-10-30）：`_need("mix")` 查的是 `mix` 不是 `mix.wav`，导致缓存永远 miss、每次全量重跑。现已用 `CACHE_FILES` 短名映射表修正。
+4. **transformers 后端的 ASR 没有 VAD**：配乐吟唱段会出幻觉循环（实测 59–82s 段"森林肯定的"×N → "sure, sure, sure"）。**已加启发式过滤**（`_filter_hallucinations`：自身循环 + 连续 ≥3 段共享实词且每段 ≤10 词的幻觉串整串丢弃；能量门限无效——demucs 把吟唱分进人声轨，响度与真解说相当）。**非循环幻觉（"谢谢观看"类）仍会漏**，根治要 VAD，与 diarization 一起做。分段数两次运行会漂（19→12→18），属 whisper 长音频常态。
+5. **edge-tts 必须 ≥7.3.1**：conda 里自带的 7.2.8 连微软 WebSocket 直接 403（Sec-MS-GEC 校验变了）。已在 venv 内升级遮蔽，不动 conda 基座。偶发瞬时 403 重试即可。
+6. **还没做说话人分离（diarization）**，所有台词用同一个音色。这是下一步。
+7. ~~缓存判断 bug~~（已修 2026-10-30）：`_need("mix")` 查的是 `mix` 不是 `mix.wav`，导致缓存永远 miss、每次全量重跑。现已用 `CACHE_FILES` 短名映射表修正。另注意 `--force` 不含 `final` 时，上游变了混音不会重做。
 
 ---
 
 ## 下一步（按优先级）
 
-1. ~~**跑通真 ASR**~~：✅ 2026-10-30 完成。whisper-large-v3-turbo 在 8060S 上 2.7× 实时、峰值显存 2.16 GB——完全可用，还剩 80 GB 显存余量给 TTS/diarization 同驻。
-2. **接 TTS**：先 `edge` 验证全链路听感，再决定装 CosyVoice 3 还是 IndexTTS-2.5。
-3. **加 VAD / 幻觉抑制**：见已知问题 4；可与 diarization 合并做。
-4. **加 diarization**：`pyannote` 或 `3D-Speaker`，把角色分开，每个角色一个参考音色。
+1. ~~跑通真 ASR~~：✅ 2026-10-30。
+2. ~~全链路第一版（ASR + LLM 翻译 + edge TTS + 混音）~~：✅ 2026-10-30，`out/first_v1.wav`（中→英 120s）。
+3. **加 diarization + VAD**：`pyannote` 或 `3D-Speaker` 分角色；顺带根治非循环幻觉（已知问题 4）。
+4. **音色克隆 TTS 选型**：CosyVoice 3 vs IndexTTS-2.5（`--ref-wav` 通道已留好）。
 5. **音色距离约束**：见 v2 架构文档第 2.4 节，解决"两个角色声音太像"。
 6. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
 

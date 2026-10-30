@@ -157,13 +157,13 @@ def asr(path: str, backend: str = "auto", model: str = "large-v3-turbo",
         return out
     if backend in ("auto", "faster"):
         try:
-            return _asr_faster(path, model, language, device)
+            return _filter_hallucinations(_asr_faster(path, model, language, device))
         except Exception as exc:
             if backend == "faster":
                 raise
             print(f"[warn] faster-whisper 不可用（{exc}），改用 transformers", file=sys.stderr)
     if backend in ("auto", "transformers"):
-        return _asr_transformers(path, language, device)
+        return _filter_hallucinations(_asr_transformers(path, language, device))
     raise ValueError(f"未知 ASR backend: {backend}")
 
 
@@ -181,6 +181,75 @@ def _asr_faster(path: str, model: str, language: str | None, device: str) -> lis
         m = WhisperModel(model, device="cpu", compute_type="int8")
         segs, _ = m.transcribe(path, language=language, vad_filter=True, beam_size=5)
         return [Segment(s.start, s.end, s.text.strip()) for s in segs if s.text.strip()]
+
+
+def _is_loopy(text: str) -> bool:
+    """whisper 幻觉循环检测：同一 bigram 或同一词反复出现。
+
+    幻觉多发生在配乐吟唱/无解说段（demucs 会把吟唱分进人声轨，能量不低，
+    只能靠文本信号）。真台词偶有叠词，但 top bigram 占比到不了阈值。
+    """
+    import re
+    from collections import Counter
+
+    t = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text.lower()).strip()
+    if len(t) < 4:
+        return False
+    grams = Counter(t[i : i + 2] for i in range(len(t) - 1))
+    _, top_c = grams.most_common(1)[0]
+    if top_c >= 3 and top_c / len(t) > 0.2:
+        return True
+    words = t.split()
+    if len(words) <= 10:
+        wc = Counter(w for w in words if len(w) >= 2)
+        if wc and wc.most_common(1)[0][1] >= 3:
+            return True
+    return False
+
+
+def _grams(text: str) -> set[str]:
+    import re
+
+    t = re.sub(r"[^\w\u4e00-\u9fff]+", "", text.lower())
+    return {t[i : i + 2] for i in range(len(t) - 1)}
+
+
+def _tokens(text: str) -> set[str]:
+    """实词 token：英文词（≥3 字符）+ 中文 bigram。用于跨段串检测。"""
+    import re
+
+    words = set(re.findall(r"[a-z]{3,}", text.lower()))
+    return words | {g for g in _grams(text) if re.search(r"[\u4e00-\u9fff]", g)}
+
+
+def _filter_hallucinations(segs: list[Segment]) -> list[Segment]:
+    """幻觉过滤。R1：自身循环（同 bigram/词反复）；R2：连续 ≥3 段共享同一实词
+    且每段都短（≤10 词）→ 幻觉串整串丢弃。真解说段偶有同主题连段，但通常
+    段更长、不会每段都共享同一实词。"""
+    texts = [s.text for s in segs]
+    toks = [_tokens(t) for t in texts]
+    nwords = [len(t.split()) or len(t) // 2 for t in texts]
+    kill = set()
+
+    for i in range(len(segs)):
+        if i in kill:
+            continue
+        j = i
+        common = toks[i]
+        while j + 1 < len(segs) and nwords[j + 1] <= 10:
+            nxt = common & toks[j + 1]
+            if not nxt:
+                break
+            common = nxt
+            j += 1
+        if j - i + 1 >= 3 and nwords[i] <= 10:
+            kill.update(range(i, j + 1))
+
+    out = [s for k, s in enumerate(segs) if k not in kill and not _is_loopy(s.text)]
+    dropped = len(segs) - len(out)
+    if dropped:
+        print(f"    [asr] 丢弃幻觉段 {dropped}/{len(segs)}")
+    return out
 
 
 def _asr_transformers(path: str, language: str | None, device: str) -> list[Segment]:
