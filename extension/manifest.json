@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "dub-engine",
+  "description": "网页视频 AI 配音——本地引擎 + 一键换语言",
+  "version": "0.1.0",
+  "permissions": ["webRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "idle",
+      "all_frames": false
+    }
+  ]
+}

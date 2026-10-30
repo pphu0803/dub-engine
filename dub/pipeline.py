@@ -67,20 +67,25 @@ def _key(opts: Options) -> str:
 
 
 class Runner:
-    def __init__(self, opts: Options):
+    def __init__(self, opts: Options, on_stage=None):
         self.o = opts
         self.work = os.path.join(opts.workdir, _key(opts))
         os.makedirs(self.work, exist_ok=True)
         self.timings: dict[str, float] = {}
         self.profiles: dict = {}
+        self.on_stage = on_stage  # on_stage(name, "start"|"done", dt)
 
     def _t(self, name: str, fn):
         t0 = time.perf_counter()
         print(f"[{name}] ...", flush=True)
+        if self.on_stage:
+            self.on_stage(name, "start", 0.0)
         out = fn()
         dt = time.perf_counter() - t0
         self.timings[name] = dt
         print(f"[{name}] {dt:.1f}s", flush=True)
+        if self.on_stage:
+            self.on_stage(name, "done", dt)
         return out
 
     def _path(self, name: str) -> str:

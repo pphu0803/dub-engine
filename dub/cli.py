@@ -16,6 +16,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="检查环境与依赖")
 
+    s = sub.add_parser("serve", help="启动本地服务（浏览器插件后端）")
+    s.add_argument("--port", type=int, default=8765)
+
     r = sub.add_parser("run", help="跑完整管线")
     r.add_argument("--input", required=True, help="本地媒体文件（mp4/mkv/m4s/wav 都行）")
     r.add_argument("--out", default="out/final.wav")
@@ -43,6 +46,11 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.cmd == "doctor":
         return doctor_run()
+    if args.cmd == "serve":
+        from .serve import serve
+
+        serve(args.port)
+        return 0
 
     opts = Options(
         input=args.input,

@@ -232,6 +232,32 @@ work/<hash>/
 6. **音色距离约束**：见 v2 架构文档第 2.4 节。
 7. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
 
+## 浏览器插件（v0.1）
+
+```
+插件 (MV3)                                本地引擎
+  content.js  注入按钮/状态pill/同步播放     POST /api/dub {url, referer} 或 {path}
+      ⇅ chrome.runtime                     GET  /api/job/<id>       阶段/时间轴
+  background.js  webRequest 抓音轨URL  ⇄   GET  /api/job/<id>/audio 成品mp3
+  （5s 窗口，audio 命中词优先）              （127.0.0.1:8765，GPU 串行）
+```
+
+**启动**：
+
+```powershell
+# 1. 起引擎（需要 LLM 环境变量，同 run）
+C:\code\dub\venv\Scripts\python.exe -m dub serve --port 8765
+# 2. 浏览器（Edge/Chrome）→ 扩展管理 → 开发人员模式 → 加载解压缩扩展
+#    选 C:\code\dub\dub-engine\extension\
+# 3. 打开视频页 → 播放 2 秒 → 点右上角「🎙 AI 配音」→ 等进度 → 自动切换
+```
+
+**同步播放**：原声静音，Audio 元素播配音母版（bed+配音），play/pause/seek/倍速全跟随，漂移 >0.35s 自动校正。音频经 service worker fetch → blob URL 回传页面，绕开 https→http 混合内容限制；服务端所有响应带 CORS + PNA 头。
+
+**v1 限制**：只支持直链音轨（B 站 DASH audio m4s ✓，HLS/m3u8 未接）；音轨捕获靠点按钮后 5 秒窗口内视频正在播放；一次只跑一个 job。
+
+---
+
 ## 相关文档
 
 - 可行性研究：`Obsidian Vault/技术笔记/网页视频实时换语言-AI配音可行性研究-2026-10.md`
