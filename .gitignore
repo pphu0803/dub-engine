@@ -1,0 +1,31 @@
+# data / 产物
+data/
+*.ts
+*.m4s
+*.mp4
+*.wav
+*.m4a
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 模型权重
+models/
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 运行产物
+*.log
+out/
+cache/
