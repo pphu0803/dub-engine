@@ -187,66 +187,85 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
                           (state.get("registry") or {}).get("profiles"))
     cps = CPS.get(lang, 4.5)
 
-    # 3) 逐段推进
-    for ch in state["chunks"]:
-        if ch["status"] == "done":
-            continue
+    # 3) 逐段推进（两遍：单段失败不杀任务，先跑完其余段再回头重试失败段）
+    def process_chunk(ch: dict) -> None:
         i, a, b = ch["i"], ch["start"], ch["end"]
         ch["status"] = "running"
         job["stage"] = f"chunk {i + 1}/{n_chunks}"
         json.dump(state, open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
-        try:
-            cdir = os.path.join(job_dir, f"c{i:03d}")
-            os.makedirs(cdir, exist_ok=True)
+        cdir = os.path.join(job_dir, f"c{i:03d}")
+        os.makedirs(cdir, exist_ok=True)
 
-            cmix = os.path.join(cdir, "mix.wav")
-            _slice_wav(mix, cmix, a, b)
+        cmix = os.path.join(cdir, "mix.wav")
+        _slice_wav(mix, cmix, a, b)
 
-            vocals, bed = stages.separate(cmix, cdir)
+        vocals, bed = stages.separate(cmix, cdir)
 
-            segs = stages._asr_transformers(vocals, source_lang or None, "auto")
-            segs = stages._filter_hallucinations(segs)
+        segs = stages._asr_transformers(vocals, source_lang or None, "auto")
+        segs = stages._filter_hallucinations(segs)
 
-            v16, sr16 = audio.load(vocals, sr=16000, mono=True)
-            last_emb = None
-            by_spk_audio: dict[int, list] = {}
-            for s in segs:
-                seg = v16[int(s.start * sr16):int(s.end * sr16), 0]
-                if len(seg) >= sr16:
-                    last_emb = diarize.embed(seg)
-                    s.speaker = reg.assign(last_emb)
-                else:
-                    s.speaker = reg.assign(last_emb) if last_emb is not None else 0
-                by_spk_audio.setdefault(s.speaker, []).append(seg)
-            for spk, wavs in by_spk_audio.items():
-                reg.ensure_profile(spk, wavs)
+        v16, sr16 = audio.load(vocals, sr=16000, mono=True)
+        last_emb = None
+        by_spk_audio: dict[int, list] = {}
+        for s in segs:
+            seg = v16[int(s.start * sr16):int(s.end * sr16), 0]
+            if len(seg) >= sr16:
+                last_emb = diarize.embed(seg)
+                s.speaker = reg.assign(last_emb)
+            else:
+                s.speaker = reg.assign(last_emb) if last_emb is not None else 0
+            by_spk_audio.setdefault(s.speaker, []).append(seg)
+        for spk, wavs in by_spk_audio.items():
+            reg.ensure_profile(spk, wavs)
 
-            stages.translate(segs, backend="llm", target=lang, chars_per_sec=cps,
-                             api_base=api_base, api_key=api_key, model=llm_model)
-            stages.tts(segs, os.path.join(cdir, "tts"), backend=tts_backend,
-                       lang=lang, profiles=reg.profiles)
+        stages.translate(segs, backend="llm", target=lang, chars_per_sec=cps,
+                         api_base=api_base, api_key=api_key, model=llm_model)
+        stages.tts(segs, os.path.join(cdir, "tts"), backend=tts_backend,
+                   lang=lang, profiles=reg.profiles)
 
-            _mix_chunk(bed, segs, os.path.join(cdir, "chunk.wav"), gain)
-            mp3 = os.path.join(cdir, "chunk.mp3")
-            _to_mp3(os.path.join(cdir, "chunk.wav"), mp3)
-            ch["status"] = "done"
-            ch["mp3"] = mp3
-            job["chunks_done"] = sum(1 for c in state["chunks"] if c["status"] == "done")
-            ch["segments"] = [
-                {"start": a + s.start, "end": a + s.end,
-                 "text": s.translated or s.text, "speaker": s.speaker}
-                for s in segs
-            ]
-        except Exception as exc:
-            ch["status"] = "error"
-            job["error"] = f"段 {i + 1}: {type(exc).__name__}: {exc}"
-            job["status"] = "error"
+        _mix_chunk(bed, segs, os.path.join(cdir, "chunk.wav"), gain)
+        mp3 = os.path.join(cdir, "chunk.mp3")
+        _to_mp3(os.path.join(cdir, "chunk.wav"), mp3)
+        ch["status"] = "done"
+        ch["mp3"] = mp3
+        job["chunks_done"] = sum(1 for c in state["chunks"] if c["status"] == "done")
+        ch["segments"] = [
+            {"start": a + s.start, "end": a + s.end,
+             "text": s.translated or s.text, "speaker": s.speaker}
+            for s in segs
+        ]
+
+    errors: dict[int, str] = {}
+    for round_no in (1, 2):  # 第二遍只重试第一遍失败的段
+        for ch in state["chunks"]:
+            if ch["status"] == "done":
+                continue
+            if round_no == 2 and ch["i"] not in errors:
+                continue
+            try:
+                process_chunk(ch)
+                errors.pop(ch["i"], None)
+            except Exception as exc:
+                ch["status"] = "error"
+                errors[ch["i"]] = f"{type(exc).__name__}: {exc}"
+                job["error"] = f"段 {ch['i'] + 1}: {errors[ch['i']]}"
             json.dump(state, open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
-            return
-        json.dump(state, open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
+        if not errors:
+            break
+        if round_no == 1 and errors:
+            print(f"    [stream] 第一遍失败 {len(errors)} 段，重试中…", flush=True)
 
-    # 4) 合成整轨（顺序拼接段 wav）
+    # 4) 收尾：全部成功 → 拼整轨；有失败段 → partial（已完成段照常可听，可重试）
     state["registry"] = reg.dump()
+    json.dump(state, open(state_path, "w", encoding="utf-8"), ensure_ascii=False)
+    if errors:
+        job["status"] = "partial"
+        job["stage"] = "partial"
+        job["error"] = "；".join(f"段 {i + 1}: {m}" for i, m in sorted(errors.items()))
+        job["total_s"] = round(time.perf_counter() - t0, 1)
+        job["segments_total"] = sum(len(c.get("segments") or []) for c in state["chunks"])
+        return
+
     job["stage"] = "final"
     final_wav = os.path.join(job_dir, "final.wav")
     if not os.path.exists(final_wav):

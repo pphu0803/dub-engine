@@ -403,6 +403,10 @@ def translate(segments: list[Segment], backend: str = "stub", target: str = "zh"
 
     import requests
 
+    # 国内 API 直连：requests 默认吃系统代理，代理抖动会制造超时（GARP-Lens 同款教训）
+    sess = requests.Session()
+    sess.trust_env = False
+
     for i in range(0, len(segments), 20):
         batch = segments[i : i + 20]
         lines = []
@@ -418,11 +422,21 @@ def translate(segments: list[Segment], backend: str = "stub", target: str = "zh"
                 {"role": "user", "content": user},
             ],
         }
-        r = requests.post(f"{api_base}/chat/completions",
-                          headers={"Authorization": f"Bearer {api_key}"},
-                          json=payload, timeout=120)
-        r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"]
+        text = None
+        for attempt in range(4):
+            try:
+                r = sess.post(f"{api_base}/chat/completions",
+                              headers={"Authorization": f"Bearer {api_key}"},
+                              json=payload, timeout=(15, 90))
+                r.raise_for_status()
+                text = r.json()["choices"][0]["message"]["content"]
+                break
+            except Exception as exc:
+                if attempt == 3:
+                    raise
+                wait = 3 * (attempt + 1)
+                print(f"    [translate] LLM 重试 {attempt + 1}/4（{type(exc).__name__}，{wait}s 后）", flush=True)
+                time.sleep(wait)
         out = _parse_lines(text)
         for j, s in enumerate(batch, 1):
             s.translated = out.get(j, "") or s.text

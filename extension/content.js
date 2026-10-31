@@ -193,6 +193,16 @@
       }
       return;
     }
+    if (st.status === "partial") {
+      // 部分段失败：已完成的照常可听，点「重新配音」续跑失败段
+      clearInterval(timer);
+      const badN = chunks.filter((c) => c.status === "error").length;
+      if (!player.started && chunks[0] && chunks[0].status === "done") startPlayer();
+      show(`⚠️ ${doneN}/${chunks.length} 段完成，${badN} 段失败——点「重新配音」重试失败段`, 15000);
+      btn.textContent = "🎙 重新配音";
+      btn.style.display = "block";
+      return;
+    }
     if (st.status === "running") {
       if (!chunks.length) {
         show(`⏳ ${st.stage === "extract" ? "抽取整轨" : st.stage || "处理中"}…`);

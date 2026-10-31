@@ -131,8 +131,17 @@ def start_job(payload: dict, workdir: str) -> dict:
 
     if key in JOBS_BY_KEY:
         job = JOBS[JOBS_BY_KEY[key]]
+        if job["status"] == "done":
+            return {"job_id": job["id"], "status": "done", "cached": True,
+                    "chunks_done": job.get("chunks_done", 0)}
+        if job["status"] in ("error", "partial"):
+            # 失败/部分完成的任务：再点一次=续跑失败段（state 驱动）
+            job["status"] = "running"
+            threading.Thread(target=job["run"], daemon=True).start()
+            return {"job_id": job["id"], "status": "running", "cached": False,
+                    "chunks_done": job.get("chunks_done", 0)}
         return {"job_id": job["id"], "status": job["status"],
-                "cached": job["status"] == "done", "chunks_done": job.get("chunks_done", 0)}
+                "cached": False, "chunks_done": job.get("chunks_done", 0)}
 
     jid = uuid.uuid4().hex[:8]
     job = {
@@ -157,6 +166,7 @@ def start_job(payload: dict, workdir: str) -> dict:
                 job["status"] = "error"
                 job["error"] = f"{type(exc).__name__}: {exc}"
 
+    job["run"] = run
     threading.Thread(target=run, daemon=True).start()
     return {"job_id": jid, "status": job["status"], "cached": False, "chunks_done": 0}
 
