@@ -30,6 +30,16 @@ JOBS: dict[str, dict] = {}
 _ACTIVE = threading.Lock()  # 同一时间只允许一个 job 占 GPU
 
 
+def _looks_like_audio(head: bytes) -> bool:
+    if head[:4] in (b"OggS", b"RIFF", b"fLaC") or head[:3] == b"ID3":
+        return True
+    if head[4:8] == b"ftyp":  # mp4/m4s/m4a 容器
+        return True
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:  # mpeg audio
+        return True
+    return False
+
+
 def _download(url: str, referer: str, dst: str) -> int:
     import requests
 
@@ -40,10 +50,20 @@ def _download(url: str, referer: str, dst: str) -> int:
     r = s.get(url, stream=True, timeout=(15, 60))
     r.raise_for_status()
     n = 0
+    head = b""
     with open(dst, "wb") as f:
         for chunk in r.iter_content(1 << 20):
+            if len(head) < 16:
+                head += chunk
             f.write(chunk)
             n += len(chunk)
+    # 插件偶发抓到 HTML/空响应（播放器杂项请求），在这里拦下给清楚报错
+    if n < 64 * 1024 or not _looks_like_audio(head[:16]):
+        ctype = r.headers.get("content-type", "?")
+        os.remove(dst)
+        raise ValueError(
+            f"捕获的 URL 不是音轨（{n/1024:.0f} KB, {ctype}）。刷新视频页、播放 2 秒后重试"
+        )
     return n
 
 

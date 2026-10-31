@@ -57,15 +57,16 @@
   function attach(url) {
     const vids = [...document.querySelectorAll("video")].filter((v) => v.duration > 0 || v.src || v.currentSrc);
     const video = vids.sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
-    if (!video) { show("页面上没找到 <video>", 4000); return; }
+    if (!video) { show("页面上没找到 <video>", 6000); return; }
     video.muted = true;
     const audio = new Audio(url);
     audio.preload = "auto";
     dub = { audio, video };
     sync(video, audio);
     if (!video.paused) { audio.currentTime = video.currentTime; audio.play().catch(() => {}); }
-    show("🔊 已切换 AI 配音（原声已静音）", 3500);
-    btn.textContent = "🎙 已配音";
+    // 成功提示常驻（视频暂停时也要让人看见），按钮变"重新配音"
+    show("🔊 AI 配音已就绪，原声已静音" + (video.paused ? " —— 点播放开始" : ""));
+    btn.textContent = "🎙 重新配音";
     btn.style.display = "block";
   }
 
