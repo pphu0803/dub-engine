@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# ROCm 实验性 attention 内核：两组 A/B 实测 ASR 稳定更快（长音频 131s vs 193-315s），
+# 未启用时 torch 回退到慢路径。setdefault：外部已设则以外部为准。
+os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+
 from . import audio
 
 SR_MIX = 44100
@@ -105,11 +109,13 @@ def extract_audio(src: str, dst: str, sr: int = SR_MIX, channels: int = 2) -> fl
 # --------------------------------------------------------------------------- #
 
 
+_DEMUCS = {}
+
+
 def separate(mix_wav: str, out_dir: str, device: str = "cuda", model_name: str = "htdemucs") -> tuple[str, str]:
     """返回 (vocals_path, bed_path)。失败则抛异常，由调用方决定是否 duck 兜底。"""
     import torch
     from demucs.apply import apply_model
-    from demucs.pretrained import get_model
 
     # 不用 torchaudio.load：2.10 起它依赖 torchcodec，而我们手里本来就是 wav
     data, sr = audio.load(mix_wav, sr=SR_MIX)
@@ -117,10 +123,16 @@ def separate(mix_wav: str, out_dir: str, device: str = "cuda", model_name: str =
         data = np.repeat(data, 2, axis=1)
     wav = torch.from_numpy(data.T.copy())  # (ch, n)
 
-    model = get_model(model_name)
-    model.eval()
     device = resolve_device(device)
-    model.to(device)
+    key = (model_name, device)
+    if key not in _DEMUCS:
+        from demucs.pretrained import get_model
+
+        m = get_model(model_name)
+        m.eval()
+        m.to(device)
+        _DEMUCS[key] = m
+    model = _DEMUCS[key]
 
     ref = wav.mean(0)
     norm = (wav - ref.mean()) / (ref.std() + 1e-8)
@@ -289,26 +301,53 @@ def vad_regions(data16k: np.ndarray, sr: int = 16000, pad_ms: int = 150,
     return out
 
 
-def _asr_transformers(path: str, language: str | None, device: str) -> list[Segment]:
+_ASR_PIPES = {}
+
+
+def _get_asr_pipe(model_id: str, dev: int):
+    """pipeline 常驻缓存：serve 进程跨 job 复用，省每次的模型加载与预热。"""
     import torch
     from transformers import pipeline
 
+    key = (model_id, dev)
+    if key not in _ASR_PIPES:
+        _ASR_PIPES[key] = pipeline("automatic-speech-recognition", model=model_id, device=dev,
+                                   torch_dtype=torch.float16 if dev == 0 else torch.float32)
+    return _ASR_PIPES[key]
+
+
+def _asr_transformers(path: str, language: str | None, device: str) -> list[Segment]:
+    import torch
+
     model_id = "openai/whisper-large-v3-turbo"
     dev = 0 if (device in ("auto", "cuda") and torch.cuda.is_available()) else -1
-    pipe = pipeline("automatic-speech-recognition", model=model_id, device=dev,
-                    torch_dtype=torch.float16 if dev == 0 else torch.float32)
+    pipe = _get_asr_pipe(model_id, dev)
     data, sr = audio.load(path, sr=16000, mono=True)
     regions = vad_regions(data[:, 0])
     print(f"    [vad] 语音区 {len(regions)} 个，共 {sum(b-a for a, b in regions):.1f}s / {len(data)/sr:.0f}s")
-    kwargs = {"return_timestamps": True}
-    if language:
-        kwargs["generate_kwargs"] = {"language": language}
-    segs = []
+
+    clips, spans = [], []
     for a, b in regions:
         clip = data[int(a * sr):int(b * sr), 0]
         if len(clip) < int(1.2 * sr):
             continue
-        out = pipe({"array": clip, "sampling_rate": sr}, **kwargs)
+        clips.append(clip)
+        spans.append(a)
+
+    # 短区块（<28s）直读+跨区批推理最快；任一区块超长则必须开 chunk_length_s
+    # （whisper 窗口 30s，长区不分会连时间戳带内容被静默截断）
+    need_chunk = any(len(c) > int(28 * sr) for c in clips)
+    kwargs = {"return_timestamps": True, "batch_size": 4}
+    if need_chunk:
+        kwargs["chunk_length_s"] = 30
+    if language:
+        kwargs["generate_kwargs"] = {"language": language}
+    outs = pipe([{"array": c, "sampling_rate": sr} for c in clips], **kwargs)
+    if isinstance(outs, dict):
+        outs = [outs]
+
+    segs = []
+    for a, out in zip(spans, outs):
         for c in out.get("chunks") or []:
             ts = c.get("timestamp") or (0, 0)
             if ts[0] is None or ts[1] is None:
@@ -456,17 +495,30 @@ def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str
     stats = Stats(segments=len(segments))
     pool = EDGE_SPEAKER_VOICES.get(lang, EDGE_SPEAKER_VOICES["zh"])
     by_profile = EDGE_VOICE_BY_PROFILE.get(lang, {})
+
+    def voice_of(s: Segment) -> str:
+        if voice:
+            return voice
+        if profiles and s.speaker in profiles:
+            p = profiles[s.speaker]
+            return by_profile.get((p["gender"], p["age"]), "")
+        return pool[s.speaker % len(pool)]
+
+    if backend == "edge":
+        # 并发合成：微软端点单段一次 WebSocket 握手，串行是长视频的主要瓶颈之一
+        jobs = [(s.translated or s.text,
+                 os.path.join(out_dir, f"seg_{i:04d}.wav"), voice_of(s))
+                for i, s in enumerate(segments)]
+        _tts_edge_batch(jobs)
+        for (_, dst, _), s in zip(jobs, segments):
+            s.tts_path = dst
+        return stats
+
     for i, s in enumerate(segments):
         dst = os.path.join(out_dir, f"seg_{i:04d}.wav")
         text = s.translated or s.text
         if backend == "stub":
             _tts_stub(text, dst, s.duration)
-        elif backend == "edge":
-            v = voice
-            if not v and profiles and s.speaker in profiles:
-                p = profiles[s.speaker]
-                v = by_profile.get((p["gender"], p["age"]), "")
-            _tts_edge(text, dst, v or pool[s.speaker % len(pool)])
         elif backend == "cosyvoice":
             _tts_cosyvoice(text, dst, ref_wav, device)
         else:
@@ -484,24 +536,30 @@ def _tts_stub(text: str, dst: str, duration: float) -> None:
     audio.save(dst, tone.astype(np.float32), SR_TTS)
 
 
-def _tts_edge(text: str, dst: str, voice: str) -> None:
+def _tts_edge_batch(jobs: list[tuple[str, str, str]]) -> None:
+    """并发合成 [(text, dst, voice)]。微软端点偶发 403/断连，逐段重试三次。"""
     import asyncio
 
     import edge_tts
 
-    async def run():
-        await edge_tts.Communicate(text, voice).save(dst)
+    sem = asyncio.Semaphore(6)
 
-    # 微软端点偶发 403/断连，重试三次基本必过
-    for attempt in range(3):
-        try:
-            asyncio.run(run())
-            return
-        except Exception as exc:
-            if attempt == 2:
-                raise
-            print(f"    [tts] edge 重试 {attempt + 1}/3：{type(exc).__name__}", flush=True)
-            time.sleep(1.5 * (attempt + 1))
+    async def one(text: str, dst: str, voice: str) -> None:
+        for attempt in range(3):
+            try:
+                async with sem:
+                    await edge_tts.Communicate(text, voice).save(dst)
+                return
+            except Exception as exc:
+                if attempt == 2:
+                    raise
+                print(f"    [tts] edge 重试 {attempt + 1}/3：{type(exc).__name__}", flush=True)
+                await asyncio.sleep(1.5 * (attempt + 1))
+
+    async def run():
+        await asyncio.gather(*(one(*j) for j in jobs))
+
+    asyncio.run(run())
 
 
 _COSY = {}
