@@ -8,6 +8,28 @@
   if (window.__dubInstalled) return;
   window.__dubInstalled = true;
 
+  // 页面资源历史默认只留 ~250 条，长页面会挤掉音轨请求，扩容
+  try { performance.setResourceTimingBufferSize(4000); } catch (_) {}
+
+  function sniff() {
+    const MEDIA_RE = /\.(m4s|mp4|m4a|aac|webm|mp3|ogg|wav|flac)(\?|#|$)/i;
+    const urls = new Set();
+    for (const e of performance.getEntriesByType("resource")) {
+      if (/^https?:/.test(e.name) && MEDIA_RE.test(e.name)) urls.add(e.name);
+    }
+    document.querySelectorAll("video,audio,source").forEach((el) => {
+      if (el.src) urls.add(el.src);
+      if (el.currentSrc) urls.add(el.currentSrc);
+    });
+    try {
+      const pr = window.ytInitialPlayerResponse;
+      (pr?.streamingData?.adaptiveFormats || [])
+        .filter((f) => (f.mimeType || "").startsWith("audio/") && f.url)
+        .forEach((f) => urls.add(f.url));
+    } catch (_) { /* 非 YouTube */ }
+    return [...urls];
+  }
+
   const pill = document.createElement("div");
   Object.assign(pill.style, {
     position: "fixed", top: "12px", right: "12px", zIndex: 2147483647,
@@ -70,12 +92,14 @@
     btn.style.display = "block";
   }
 
-  chrome.runtime.onMessage.addListener((m) => {
+  chrome.runtime.onMessage.addListener((m, s, rep) => {
+    if (m.type === "dub-sniff") { rep({ urls: sniff() }); return false; }
     if (m.type === "dub-status") {
       if (m.stage === "error") show("❌ " + (m.detail || "失败"), 8000);
       else show(`⏳ ${m.stage}${m.detail ? " · " + m.detail : ""}`);
     } else if (m.type === "dub-ready") {
       attach(m.url);
     }
+    return false;
   });
 })();

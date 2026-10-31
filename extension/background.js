@@ -1,10 +1,11 @@
 /**
- * background.js — 观测媒体请求 → 按分挑选音轨 → 调本地引擎 → blob URL 回传
+ * background.js — 音轨候选收集 → 打分挑选 → 调本地引擎 → blob URL 回传
  *
- * 音轨捕获不是"5 秒窗口碰运气"：持续记录每个标签页观察到的媒体 URL
- * （content-type / 大小 / 时间），点按钮后优先用最近窗口里的最佳候选，
- * 窗口里没有好货就回退到本标签页近 15 分钟内的历史最佳——真音轨在页面
- * 加载时只出现一次，重试靠的就是这份历史。
+ * 候选两个来源（SW 会被 MV3 杀掉重启，所以记录必须放 storage.session）：
+ *   1. content script 读 performance 资源历史（主来源，页面自己记全账）
+ *   2. webRequest 观测（带 content-type/大小，用于打分加权）
+ * 打分：audio/* content-type、B 站音轨特征码、音频扩展名、m4s、体积；
+ * HTML/JSON/图片强惩罚。低于阈值直接报"没找到"，不再瞎抓。
  */
 
 const SERVER = "http://127.0.0.1:8765";
@@ -12,23 +13,33 @@ const MEDIA_RE = /\.(m4s|mp4|m4a|aac|webm|mp3|ogg|wav|flac)(\?|#|$)/i;
 const PLAYLIST_RE = /\.(m3u8|mpd)(\?|#|$)/i;
 const AUDIO_HINT = /(audio|aud|aac|m4a|dash_audio|_140|_251|30280|30216|30232)/i;
 
-const KEEP_MS = 15 * 60 * 1000;
-const tabMedia = new Map(); // tabId -> Map(url -> {ct, len, ts})
+let media = {}; // {tabId: {url: {ct, len, ts}}}，与 storage.session 同步
+let flushTimer = null;
 
-function noteMedia(tabId, url, ct, len) {
+function note(tabId, url, ct, len) {
   if (PLAYLIST_RE.test(url) || !MEDIA_RE.test(url)) return;
-  if (!tabMedia.has(tabId)) tabMedia.set(tabId, new Map());
-  const m = tabMedia.get(tabId);
-  const prev = m.get(url);
-  m.set(url, {
+  const t = (media[tabId] = media[tabId] || {});
+  const prev = t[url];
+  t[url] = {
     ct: ct || (prev && prev.ct) || "",
     len: len || (prev && prev.len) || 0,
     ts: (prev && prev.ts) || Date.now(),
-  });
+  };
+  scheduleFlush();
 }
 
+function scheduleFlush() {
+  if (flushTimer) return;
+  flushTimer = setTimeout(async () => {
+    flushTimer = null;
+    try { await chrome.storage.session.set({ media }); } catch (_) {}
+  }, 800);
+}
+
+chrome.storage.session.get("media").then((o) => { if (o.media) media = o.media; }).catch(() => {});
+
 chrome.webRequest.onBeforeRequest.addListener(
-  (d) => noteMedia(d.tabId, d.url, "", 0),
+  (d) => note(d.tabId, d.url, "", 0),
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] },
   []
 );
@@ -37,7 +48,7 @@ chrome.webRequest.onHeadersReceived.addListener(
   (d) => {
     const h = {};
     for (const x of d.responseHeaders || []) h[x.name.toLowerCase()] = x.value;
-    noteMedia(d.tabId, d.url, h["content-type"], parseInt(h["content-length"]) || 0);
+    note(d.tabId, d.url, h["content-type"], parseInt(h["content-length"]) || 0);
   },
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] },
   ["responseHeaders"]
@@ -49,20 +60,23 @@ function score(url, e) {
   if (ct.startsWith("audio/")) s += 3;
   if (AUDIO_HINT.test(url)) s += 2;
   if (/\.(m4a|aac|mp3|flac|ogg|wav)(\?|#|$)/i.test(url)) s += 1;
+  if (/\.m4s(\?|#|$)/i.test(url)) s += 1;
   if (e.len > 300 * 1024) s += 2;
   if (e.len && e.len < 100 * 1024) s -= 5;
   if (/text\/html|application\/json|javascript|image\//.test(ct)) s -= 10;
   return s;
 }
 
-function pick(tabId) {
-  const all = [...(tabMedia.get(tabId) || new Map()).entries()]
+function pick(candidates, tabId) {
+  const now = Date.now();
+  for (const u of candidates || []) note(tabId, u, "", 0); // sniff 结果并入
+  const all = Object.entries(media[tabId] || {})
     .map(([url, e]) => ({ url, ...e, s: score(url, e) }));
-  const fresh = all.filter((e) => Date.now() - e.ts <= 6000);
+  const fresh = all.filter((e) => now - e.ts <= 6000);
   const best = (pool) => pool.slice().sort((a, b) => b.s - a.s)[0];
   const bf = best(fresh), ba = best(all);
-  if (bf && bf.s >= 3) return { url: bf.url, src: "窗口" };
-  if (ba && ba.s >= 3) return { url: ba.url, src: "历史" };
+  if (bf && bf.s >= 3) return bf.url;
+  if (ba && ba.s >= 3) return ba.url;
   return null;
 }
 
@@ -72,7 +86,7 @@ async function toTab(tabId, msg) {
   try {
     await chrome.tabs.sendMessage(tabId, msg);
   } catch (_) {
-    /* 页面未就绪忽略 */
+    return null;
   }
 }
 
@@ -84,22 +98,17 @@ async function api(path, opts) {
 }
 
 async function dubStart(tabId, pageUrl, lang) {
-  // 清理过期历史
-  for (const [t, m] of tabMedia) {
-    for (const [u, e] of m) if (Date.now() - e.ts > KEEP_MS) m.delete(u);
-    if (!m.size) tabMedia.delete(t);
-  }
-  await toTab(tabId, { type: "dub-status", stage: "选音轨", detail: "从页面观察记录里挑" });
-  await sleep(3000);
-  const hit = pick(tabId);
-  if (!hit) {
+  await toTab(tabId, { type: "dub-status", stage: "读页面记录", detail: "" });
+  const sniffed = await toTab(tabId, { type: "dub-sniff" });
+  const url = pick((sniffed && sniffed.urls) || [], tabId);
+  if (!url) {
     await toTab(tabId, {
       type: "dub-status", stage: "error",
-      detail: "没找到像音轨的请求——刷新视频页、播放 2 秒再点一次",
+      detail: "没找到像音轨的请求——确认扩展已刷新后，重新打开视频页播放 2 秒再试",
     });
     return;
   }
-  console.log(`[dub] 音轨(${hit.src}):`, hit.url);
+  console.log("[dub] 音轨:", url);
 
   let job;
   try {
@@ -107,7 +116,7 @@ async function dubStart(tabId, pageUrl, lang) {
     job = await api("/api/dub", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: hit.url, referer: pageUrl, lang: lang || "zh" }),
+      body: JSON.stringify({ url, referer: pageUrl, lang: lang || "zh" }),
     });
   } catch (e) {
     await toTab(tabId, { type: "dub-status", stage: "error", detail: "连不上本地引擎：python -m dub serve" });
