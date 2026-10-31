@@ -274,8 +274,9 @@
         player.curEl = 1 - player.curEl;
       } else {
         const a = el();
-        if (needSwitch || !a.src.includes(`/audio/${c.i}`)) {
+        if (needSwitch || !a.src.endsWith(`/audio/${c.i}`)) {
           a.src = chunkUrl(c.i);
+          a.volume = 1;
           a.addEventListener("loadedmetadata", () => applyAlign(a, c), { once: true });
         }
         a.playbackRate = video.playbackRate * player.align;
@@ -289,6 +290,7 @@
       }
       player.cur = c.i;
       video.muted = true;
+      console.log(`[dub] 段${c.i} 播放 off=${Math.max(0, t - c.start).toFixed(1)}s ready=${el().readyState}`);
       // 预载下一段到另一个元素
       const nxt = player.chunks.find((x) => x.i === c.i + 1);
       if (nxt && nxt.status === "done") {
