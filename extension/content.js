@@ -50,6 +50,31 @@
   btn.onclick = () => begin().catch((e) => fail("启动失败：" + e.message));
   document.documentElement.appendChild(btn);
 
+  const tgl = document.createElement("button");
+  tgl.textContent = "🔈 切回原声";
+  Object.assign(tgl.style, {
+    position: "fixed", top: "104px", right: "12px", zIndex: 2147483647,
+    padding: "8px 16px", borderRadius: "999px", border: "0", cursor: "pointer",
+    font: "600 13px/1.4 system-ui", color: "#0c1a2e",
+    background: "linear-gradient(135deg,#8ec5fc,#e0c3fc)",
+    boxShadow: "0 2px 10px rgba(0,0,0,.35)", display: "none",
+  });
+  tgl.onclick = () => {
+    if (!player.started) return;
+    player.mode = player.mode === "dub" ? "orig" : "dub";
+    tgl.textContent = player.mode === "dub" ? "🔈 切回原声" : "🔊 切回配音";
+    if (player.mode === "orig") {
+      el().pause();
+      player.video.muted = false;
+      show("🔈 原声模式（配音暂停，进度仍跟随）");
+    } else {
+      show("🔊 配音模式");
+      syncNow(true);
+      ensurePlaying();
+    }
+  };
+  document.documentElement.appendChild(tgl);
+
   function fail(msg) {
     if (timer) clearInterval(timer);
     show("❌ " + msg, 15000);
@@ -153,6 +178,7 @@
 
   const player = {
     started: false, video: null, chunks: [], cur: -1, align: 1, curEl: 0,
+    mode: "dub", // dub | orig
     elems: [new Audio(), new Audio()], blobs: {}, // k -> objectURL
   };
   const el = () => player.elems[player.curEl];
@@ -222,11 +248,13 @@
     if (!video) { show("页面上没找到 <video>", 6000); btn.style.display = "block"; return; }
     player.started = true;
     player.video = video;
+    player.mode = "dub";
     video.muted = true;
     bind(video);
     show("🔊 AI 配音播放中（分段流式；未完成段自动回退原声）");
     btn.textContent = "🎙 重新配音";
     btn.style.display = "block";
+    tgl.style.display = "block";
     syncNow(true);
     ensurePlaying();
   }
@@ -270,6 +298,11 @@
   function syncNow(force) {
     if (!player.started || !player.video) return;
     const video = player.video;
+    if (player.mode === "orig") {
+      el().pause();
+      video.muted = false; // 原声模式：彻底让位给原视频
+      return;
+    }
     const t = video.currentTime;
     const c = chunkAt(t);
     if (!c) return;

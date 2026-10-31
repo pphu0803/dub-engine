@@ -117,21 +117,30 @@ def _to_mp3(wav: str, mp3: str) -> None:
 
 
 def _mix_chunk(bed_path: str, segs: list, out_wav: str, gain: float,
-               duck_db: float = -8.0, max_stretch: float = 1.25) -> None:
-    """段内混音：与 stages.assemble 同逻辑，但用全局统一增益替代逐段峰值归一。"""
+               duck_db: float = -8.0, max_stretch: float = 1.35) -> None:
+    """段内混音：每句起点对齐原句（口型起手），速率贴合到"下一句起点"
+    ——台词节奏跟表演走，不与下一句串位。全局统一增益防响度跳变。"""
     bed, sr = audio.load(bed_path, sr=stages.SR_MIX)
     if bed.shape[1] == 1:
         bed = np.repeat(bed, 2, axis=1)
     dub = np.zeros_like(bed)
-    for s in segs:
+    for idx, s in enumerate(segs):
         if not s.tts_path or not os.path.exists(s.tts_path):
             continue
         clip, _ = audio.load(s.tts_path, sr=stages.SR_MIX, mono=False)
         if clip.shape[1] == 1:
             clip = np.repeat(clip, 2, axis=1)
-        if s.duration > 0 and len(clip) / stages.SR_MIX > s.duration * 1.05:
-            rate = min(max_stretch, (len(clip) / stages.SR_MIX) / s.duration)
-            clip = audio.time_stretch(clip, stages.SR_MIX, rate)
+        # 窗口预算：本句起点 → 下一句起点（句间静音也归本句支配）
+        if idx + 1 < len(segs):
+            budget = max(s.duration, segs[idx + 1].start - s.start)
+        else:
+            budget = max(s.duration, (len(bed) / sr) - s.start)
+        dur = len(clip) / stages.SR_MIX
+        if budget > 0 and dur > budget:
+            cap = 1.45 if budget < 4 else max_stretch  # 短句可以压得更快，听感无碍
+            rate = min(cap, dur / budget)
+            if rate > 1.01:
+                clip = audio.time_stretch(clip, stages.SR_MIX, rate)
         start = int(s.start * stages.SR_MIX)
         audio.place_fade(dub, clip, start)
     spans = [(int(s.start * sr), int(s.end * sr)) for s in segs]
@@ -201,8 +210,9 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
 
         vocals, bed = stages.separate(cmix, cdir)
 
-        segs = stages._asr_transformers(vocals, source_lang or None, "auto")
+        segs = stages._asr_transformers(vocals, source_lang or None, "auto", merge_gap=0.15)
         segs = stages._filter_hallucinations(segs)
+        segs = stages._split_long(segs)  # 连续解说的句子级切分，配音节奏对齐的关键
 
         v16, sr16 = audio.load(vocals, sr=16000, mono=True)
         last_emb = None

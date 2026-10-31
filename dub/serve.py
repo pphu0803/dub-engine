@@ -127,7 +127,8 @@ def start_job(payload: dict, workdir: str) -> dict:
 
     lang = payload.get("lang", "zh")
     tts_backend = payload.get("tts_backend", "edge")
-    key = f"{os.path.splitext(os.path.basename(src))[0]}_{lang}_{tts_backend}"
+    # PIPELINE_VER：对齐/混音逻辑升级时 +1，让"重新配音"生成新任务吃到新逻辑
+    key = f"{os.path.splitext(os.path.basename(src))[0]}_{lang}_{tts_backend}_p3"
 
     if key in JOBS_BY_KEY:
         job = JOBS[JOBS_BY_KEY[key]]

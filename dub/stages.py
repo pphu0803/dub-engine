@@ -244,6 +244,42 @@ def _grams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
+def _split_long(segs: list[Segment], max_dur: float = 12.0) -> list[Segment]:
+    """长段按句末标点切细（连续解说没有停顿，VAD/whisper 都切不动它）。
+    时间按字符占比分配——对齐节奏的最后一环。碎片过短则并入前段。"""
+    out: list[Segment] = []
+    for s in segs:
+        if s.duration <= max_dur:
+            out.append(s)
+            continue
+        pieces: list[str] = []
+        buf = ""
+        for ch in s.text:
+            buf += ch
+            if ch in "。．！？!?；;.":
+                pieces.append(buf.strip())
+                buf = ""
+        if buf.strip():
+            pieces.append(buf.strip())
+        pieces = [p for p in pieces if p]
+        merged: list[str] = []
+        for p in pieces:
+            if merged and (len(p) < 6 or len(merged[-1]) < 6):
+                merged[-1] += p
+            else:
+                merged.append(p)
+        if len(merged) < 2:
+            out.append(s)
+            continue
+        total = sum(len(p) for p in merged)
+        cur = s.start
+        for p in merged:
+            d = s.duration * len(p) / total
+            out.append(Segment(round(cur, 3), round(cur + d, 3), p))
+            cur += d
+    return out
+
+
 def _filter_hallucinations(segs: list[Segment]) -> list[Segment]:
     """幻觉过滤。R1：自身循环（同 bigram/词反复）。
     R2：相邻段 bigram Jaccard ≥ 0.55 连成串、串长 ≥3 → 幻觉串整串丢弃
@@ -316,7 +352,8 @@ def _get_asr_pipe(model_id: str, dev: int):
     return _ASR_PIPES[key]
 
 
-def _asr_transformers(path: str, language: str | None, device: str) -> list[Segment]:
+def _asr_transformers(path: str, language: str | None, device: str,
+                      merge_gap: float = 0.35) -> list[Segment]:
     import torch
 
     model_id = "openai/whisper-large-v3-turbo"
@@ -356,10 +393,11 @@ def _asr_transformers(path: str, language: str | None, device: str) -> list[Segm
             if txt:
                 segs.append(Segment(a + float(ts[0]), a + float(ts[1]), txt))
 
-    # 间隙小于 0.35s 的相邻段合并：whisper 常把一句拆成碎窗，碎窗装不下配音
+    # 相邻段合并：whisper 常把一句拆成碎窗。merge_gap 越大段越少越"整"，
+    # 越小对齐越细（流式配音用 0.15，只拼直接连着的小碎片）
     merged: list[Segment] = []
     for s in segs:
-        if merged and s.start - merged[-1].end <= 0.35:
+        if merged and s.start - merged[-1].end <= merge_gap:
             merged[-1].end = s.end
             merged[-1].text = merged[-1].text.rstrip("，。,. ") + " " + s.text.lstrip("，。,. ")
         else:
