@@ -254,4 +254,6 @@ C:\code\dub\venv\Scripts\python.exe -m dub serve --port 8765
 
 **同步播放**：原声静音，Audio 元素播配音母版（bed+配音），play/pause/seek/倍速全跟随，漂移 >0.35s 自动校正。音频经 service worker fetch → blob URL 回传页面，绕开 https→http 混合内容限制；服务端所有响应带 CORS + PNA 头。
 
-**v1 限制**：只支持直链音轨（B 站 DASH audio m4s ✓，HLS/m3u8 未接）；音轨捕获靠点按钮后 5 秒窗口内视频正在播放；一次只跑一个 job。
+**v1 限制**：只支持直链音轨（B 站 DASH audio m4s ✓，HLS/m3u8 未接）；一次只跑一个 job。
+
+**v0.2 真机验收（2026-10-31）**：B 站普通视频 ✓（约 7.7min 片子全链 7min ≈ 1.1× 视频时长；69 段、3 说话人自动分声、画像匹配）。架构教训：**MV3 service worker 闲置 30s 被杀**，后台长驻轮询/消息链全部不可靠——v0.1 三次真机翻车后改为纯 content script（无 background、零权限），页面自己直连引擎。诊断过程：ZCode 内置浏览器（IAB）在 B 站页面上下文实测 fetch 本地引擎 4ms/200 定罪 SW，并把新架构全链路彩排后才替换。性能账：ASR 42%（transformers 无 batch）、TTS 26%（69 段串行 WebSocket）、Demucs 22%——优化方向明确。
