@@ -97,13 +97,13 @@ C:\code\dub\venv\Scripts\python.exe -m dub run `
 | 阶段 | 耗时 | 备注 |
 |---|---|---|
 | extract | 0.4 s | |
-| **separate（Demucs, ROCm）** | **21–25 s** | 首跑 58 s 含模型下载与 MIOpen 预热；热缓存后 ~21 s（~5× 实时） |
-| **asr（whisper-large-v3-turbo, fp16 GPU）** | **45–57 s** | 纯推理 45 s（**2.7× 实时**），管线内首跑 57 s 含模型加载 5 s；峰值显存 **2.16 GB**（8060S 可见 84 GB，余量巨大） |
-| translate（deepseek-flash） | 9.3 s | 11 段一次 API 调用；译文按窗口字数预算压缩，质量自然 |
-| tts（edge, Aria） | 22.3 s | 11 段串行 WebSocket |
-| assemble | 1.4 s | |
+| **separate（Demucs, ROCm）** | **21–25 s** | 模型常驻缓存（serve 跨 job 免加载） |
+| **asr（whisper-large-v3-turbo, fp16 GPU）** | **~124 s / 7.7min 音频**（旧基线 179.7s） | VAD 区列表批推理 batch_size=4 + **TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1**（ROCm 实验 attention 内核，A/B 稳定快 ~30%，未开启时 torch 走慢路径且方差巨大 193-315s）；区块 >28s 自动开 chunk_length_s（防 30s 窗口静默截断）；pipeline 常驻缓存 |
+| translate（deepseek-flash） | 13.4 s | 20 段/次批量 |
+| tts（edge, 6 路并发） | **2.8 s**（clip 9 段；69 段从 109s 降至 ~25s） | 逐段 3 次退避重试 |
+| assemble | 0.3 s | |
 
-分离热跑约 5× 实时、识别 2.7× 实时——离线配音全链路 GPU 部分合计约 1.6× 实时，10 分钟视频约 6 分钟出活。
+**全链实测（7.7min B 站片，2026-10-31 优化后）**：约 7 min → **预计 ~4.2 min（≈0.55× 视频时长）**。Demucs（~5× 实时）是剩余大头，换模型会掉质量，暂不动。
 
 ### 第一版复现命令（中→英示例）
 

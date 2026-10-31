@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -108,6 +109,51 @@ def _run_job(job: dict) -> None:
             job.update(status="error", error=f"{type(exc).__name__}: {exc}")
 
 
+def _content_key(fp: str) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(fp, "rb") as f:
+        while True:
+            b = f.read(1 << 20)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()[:16]
+
+
+def _fetch_audio(url: str, referer: str, workdir: str) -> str:
+    """下载音轨并按内容哈希落盘。同一内容无论 URL 怎么变（YT 每次加载
+    重签名、B 站过期参数）都复用同一文件——管线缓存键才稳定，刷新页面
+    重配音才不会全量重跑。URL 索引让完全相同的 URL 连下载都省掉。"""
+    dldir = os.path.join(workdir, "dl")
+    os.makedirs(dldir, exist_ok=True)
+    idx_path = os.path.join(dldir, "dl_index.json")
+    try:
+        idx = json.load(open(idx_path, encoding="utf-8"))
+    except Exception:
+        idx = {}
+    if idx.get(url) and os.path.exists(idx[url]):
+        print(f"[serve] 音轨命中下载缓存: {idx[url]}")
+        return idx[url]
+
+    ext = os.path.splitext(urlparse(url).path)[1] or ".m4s"
+    if not re.match(r"^\.[a-z0-9]{2,5}$", ext, re.I):
+        ext = ".m4s"
+    tmp = os.path.join(dldir, f"tmp_{uuid.uuid4().hex[:8]}{ext}")
+    n = _download(url, referer, tmp)
+    ck = _content_key(tmp)
+    final = os.path.join(dldir, f"{ck}{ext}")
+    if os.path.exists(final):
+        os.remove(tmp)
+    else:
+        os.replace(tmp, final)
+    idx[url] = final
+    json.dump(idx, open(idx_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"[serve] 音轨下载 {n/1e6:.1f} MB -> {final} (content {ck})")
+    return final
+
+
 def start_job(payload: dict, workdir: str) -> dict:
     if "path" in payload:
         src = os.path.abspath(payload["path"])
@@ -117,13 +163,7 @@ def start_job(payload: dict, workdir: str) -> dict:
         url = payload.get("url", "")
         if not url:
             raise ValueError("需要 url 或 path")
-        ext = ".m4s"
-        base = os.path.splitext(os.path.basename(urlparse(url).path))[0][:60] or "dl"
-        dldir = os.path.join(workdir, "dl")
-        os.makedirs(dldir, exist_ok=True)
-        src = os.path.join(dldir, f"{base}_{uuid.uuid4().hex[:6]}{ext}")
-        n = _download(url, payload.get("referer", ""), src)
-        print(f"[serve] 音轨下载 {n/1e6:.1f} MB -> {src}")
+        src = _fetch_audio(url, payload.get("referer", ""), workdir)
 
     out_dir = os.path.join(workdir, "out")
     os.makedirs(out_dir, exist_ok=True)
