@@ -75,6 +75,25 @@
   };
   document.documentElement.appendChild(tgl);
 
+  // 配音输出语言：本地记住，下次点击生效（缓存键含语言，互不覆盖）
+  const langSel = document.createElement("select");
+  langSel.innerHTML =
+    '<option value="zh">🌐 中文</option>' +
+    '<option value="en">🌐 English</option>' +
+    '<option value="ja">🌐 日本語</option>' +
+    '<option value="ko">🌐 한국어</option>';
+  langSel.value = localStorage.getItem("dub_lang") || "zh";
+  Object.assign(langSel.style, {
+    position: "fixed", top: "58px", right: "136px", zIndex: 2147483647,
+    padding: "7px 12px", borderRadius: "999px", border: "0", cursor: "pointer",
+    font: "600 13px/1.4 system-ui", color: "#fff",
+    background: "rgba(20,20,24,.82)", boxShadow: "0 2px 10px rgba(0,0,0,.35)",
+    appearance: "none", WebkitAppearance: "none",
+  });
+  langSel.title = "配音输出语言（对当前任务无影响，下次点击生效）";
+  langSel.onchange = () => localStorage.setItem("dub_lang", langSel.value);
+  document.documentElement.appendChild(langSel);
+
   function fail(msg) {
     if (timer) clearInterval(timer);
     show("❌ " + msg, 15000);
@@ -157,7 +176,10 @@
       const r = await xfetch(SERVER + "/api/dub", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: c.url, referer: location.href, lang: "zh" }),
+        body: JSON.stringify({
+          url: c.url, referer: location.href,
+          lang: localStorage.getItem("dub_lang") || "zh",
+        }),
       });
       job = await r.json();
     } catch (e) {

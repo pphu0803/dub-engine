@@ -510,16 +510,25 @@ EDGE_VOICES = {
     "zh-male": "zh-CN-YunxiNeural",
     "en": "en-US-AriaNeural",
     "en-male": "en-US-GuyNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "ja-male": "ja-JP-KeitaNeural",
+    "ko": "ko-KR-SunHiNeural",
+    "ko-male": "ko-KR-InJoonNeural",
 }
 
 # 说话人 → 音色池（diarize 出的 speaker 序号索引）；--voice 显式给则全程单音色
 EDGE_SPEAKER_VOICES = {
     "zh": ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunyangNeural"],
     "en": ["en-US-AriaNeural", "en-US-GuyNeural", "en-US-MichelleNeural", "en-US-RogerNeural"],
+    # ja/ko 可用声线少（edge-tts --list-voices 实测），池小但男女有别
+    "ja": ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"],
+    "ko": ["ko-KR-SunHiNeural", "ko-KR-InJoonNeural", "ko-KR-HyunsuMultilingualNeural"],
 }
 
 # 声学画像 → 音色（性别/年龄必须对得上，老年男不配年轻女）。
 # 有画像时优先用这张表；缺的组合回退到上面的序号池。
+# 注意：这张表必须对 (gender, age) 六种组合**全覆盖**——voice_of 查不到
+# 会返回空声线直接炸 TTS，不会落回序号池。ja/ko 没有童声，child 就近落 young。
 EDGE_VOICE_BY_PROFILE = {
     "zh": {
         ("m", "child"): "zh-CN-YunxiaNeural",
@@ -536,6 +545,22 @@ EDGE_VOICE_BY_PROFILE = {
         ("f", "child"): "en-US-AnaNeural",
         ("f", "young"): "en-US-AriaNeural",
         ("f", "mature"): "en-US-MichelleNeural",
+    },
+    "ja": {
+        ("m", "child"): "ja-JP-KeitaNeural",
+        ("m", "young"): "ja-JP-KeitaNeural",
+        ("m", "mature"): "ja-JP-KeitaNeural",
+        ("f", "child"): "ja-JP-NanamiNeural",
+        ("f", "young"): "ja-JP-NanamiNeural",
+        ("f", "mature"): "ja-JP-NanamiNeural",
+    },
+    "ko": {
+        ("m", "child"): "ko-KR-HyunsuMultilingualNeural",
+        ("m", "young"): "ko-KR-HyunsuMultilingualNeural",
+        ("m", "mature"): "ko-KR-InJoonNeural",
+        ("f", "child"): "ko-KR-SunHiNeural",
+        ("f", "young"): "ko-KR-SunHiNeural",
+        ("f", "mature"): "ko-KR-SunHiNeural",
     },
 }
 
