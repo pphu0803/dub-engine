@@ -1,10 +1,10 @@
 /**
- * content.js — 纯 content script 架构（v0.4，无 background/SW）+ 分段流式播放
+ * content.js — 纯 content script 架构（v0.5，无 background/SW）+ 分段流式播放
  *
- * 播放器是双 Audio 元素乒乓：当前段播放时预载下一段，边界切换在已就绪的
- * 元素上瞬时完成（v0.3 单元素换 src 会在加载窗口里丢播放——13 段攒出
- * "配音比原片短"和"点播放没声音"两个症状的根因）。
- * 时长对齐：loadedmetadata 后按 窗口/实际时长 微调 playbackRate（0.97~1.05）。
+ * 播放器：双 Audio 元素乒乓预载。关键约束：**媒体元素不能直连
+ * http://127.0.0.1**（PNA 对 no-cors 媒体子资源会拦，error 4），必须
+ * fetch → blob → objectURL（fetch 有 CORS+PNA 响应头放行，实测可通）。
+ * 引擎按 ~60s 静音点切段顺序处理：段 0 完成即开始播放，边播边出。
  * seek 到未完成段自动回退原声，就绪后切回配音。
  */
 (() => {
@@ -15,6 +15,7 @@
   try { performance.setResourceTimingBufferSize(4000); } catch (_) {}
 
   const SERVER = "http://127.0.0.1:8765";
+  // 扩展名判定只看路径（? 之前），防信标/日志 URL 靠查询串混进来
   const MEDIA_RE = /\.(m4s|mp4|m4a|aac|webm|mp3|ogg|wav|flac)(\?|#|$)/i;
   const STREAM_RE = /videoplayback\?/i;
   const PLAYLIST_RE = /\.(m3u8|mpd)(\?|#|$)/i;
@@ -58,7 +59,10 @@
   // ------------------------------------------------------------- 音轨挑选
 
   function sniff() {
-    const isMedia = (u) => MEDIA_RE.test(u) || STREAM_RE.test(u);
+    const isMedia = (u) => {
+      const path = u.split("?")[0];
+      return MEDIA_RE.test(path) || STREAM_RE.test(u);
+    };
     const out = [];
     for (const e of performance.getEntriesByType("resource")) {
       const u = e.name;
@@ -88,8 +92,8 @@
         if (c.forced) s += 10;
         if (AUDIO_HINT.test(c.url)) s += 2;
         if (/itag=(140|139|141|599|600)\b/i.test(c.url)) s += 2;
-        if (/\.(m4a|aac|mp3|flac|ogg|wav)(\?|#|$)/i.test(c.url)) s += 1;
-        if (/\.m4s(\?|#|$)/i.test(c.url)) s += 1;
+        if (/\.(m4a|aac|mp3|flac|ogg|wav)(\?|#|$)/i.test(c.url.split("?")[0])) s += 1;
+        if (/\.m4s(\?|#|$)/i.test(c.url.split("?")[0])) s += 1;
         if (c.size > 300 * 1024) s += 2;
         return { ...c, s };
       })
@@ -149,11 +153,19 @@
 
   const player = {
     started: false, video: null, chunks: [], cur: -1, align: 1, curEl: 0,
-    elems: [new Audio(), new Audio()],
+    elems: [new Audio(), new Audio()], blobs: {}, // k -> objectURL
   };
   const el = () => player.elems[player.curEl];
   const other = () => player.elems[1 - player.curEl];
-  const chunkUrl = (k) => `${SERVER}/api/job/${jobId}/audio/${k}`;
+
+  async function blobUrl(k) {
+    if (player.blobs[k]) return player.blobs[k];
+    const r = await xfetch(`${SERVER}/api/job/${jobId}/audio/${k}`, {}, 60000);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const u = URL.createObjectURL(await r.blob());
+    player.blobs[k] = u;
+    return u;
+  }
 
   async function poll() {
     let st;
@@ -166,7 +178,7 @@
     if (st.error && !st.status) { fail(st.error); return; }
     if (st.status === "error") { fail(st.error || "引擎出错"); return; }
 
-    const chunks = (st.chunks || []).map((c) => ({ ...c, url: chunkUrl(c.i) }));
+    const chunks = (st.chunks || []).map((c) => ({ ...c }));
     player.chunks = chunks;
     const doneN = chunks.filter((c) => c.status === "done").length;
 
@@ -264,7 +276,7 @@
     if (needSwitch || force) {
       const off = Math.max(0, t - c.start);
       const nEl = other();
-      const preloaded = nEl.src.endsWith(`/audio/${c.i}`) && nEl.readyState >= 2;
+      const preloaded = nEl.dataset.chunk === String(c.i) && nEl.readyState >= 2;
       if (needSwitch && preloaded) {
         // 乒乓切换：预载好的元素瞬时接管，无加载缺口
         el().pause();
@@ -272,30 +284,34 @@
         nEl.currentTime = off;
         if (!video.paused) nEl.play().catch((e) => show("❌ 换段播放失败：" + e.message, 6000));
         player.curEl = 1 - player.curEl;
+        player.cur = c.i;
+        video.muted = true;
+        preloadNext(c.i);
+        console.log(`[dub] 段${c.i} 乒乓接管 off=${off.toFixed(1)}s`);
       } else {
-        const a = el();
-        if (needSwitch || !a.src.endsWith(`/audio/${c.i}`)) {
-          a.src = chunkUrl(c.i);
-          a.volume = 1;
-          a.addEventListener("loadedmetadata", () => applyAlign(a, c), { once: true });
-        }
-        a.playbackRate = video.playbackRate * player.align;
-        const go = () => {
+        // blob 路径：fetch → objectURL（媒体元素直连 localhost 会被 PNA 拦）
+        blobUrl(c.i).then((u) => {
           if (player.cur !== c.i && !force) return;
-          a.currentTime = off;
-          if (!video.paused) a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000));
-        };
-        if (a.readyState >= 2) go();
-        else a.addEventListener("canplaythrough", go, { once: true });
-      }
-      player.cur = c.i;
-      video.muted = true;
-      console.log(`[dub] 段${c.i} 播放 off=${Math.max(0, t - c.start).toFixed(1)}s ready=${el().readyState}`);
-      // 预载下一段到另一个元素
-      const nxt = player.chunks.find((x) => x.i === c.i + 1);
-      if (nxt && nxt.status === "done") {
-        const o = other();
-        if (!o.src.endsWith(`/audio/${nxt.i}`)) o.src = nxt.url;
+          const a = el();
+          if (a.dataset.chunk !== String(c.i)) {
+            a.dataset.chunk = String(c.i);
+            a.src = u;
+            a.volume = 1;
+            a.addEventListener("loadedmetadata", () => applyAlign(a, c), { once: true });
+          }
+          a.playbackRate = video.playbackRate * player.align;
+          const go = () => {
+            if (player.cur !== c.i && !force) return;
+            a.currentTime = off;
+            if (!video.paused) a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000));
+          };
+          if (a.readyState >= 2) go();
+          else a.addEventListener("canplaythrough", go, { once: true });
+          player.cur = c.i;
+          video.muted = true;
+          preloadNext(c.i);
+          console.log(`[dub] 段${c.i} blob 播放 off=${off.toFixed(1)}s`);
+        }).catch((e) => show("❌ 取段音频失败：" + e.message, 8000));
       }
     } else if (!video.paused) {
       const a = el();
@@ -306,6 +322,19 @@
       } else if (Math.abs(a.currentTime - off) > 0.35) {
         a.currentTime = Math.max(0, off);
       }
+    }
+  }
+
+  function preloadNext(i) {
+    const nxt = player.chunks.find((x) => x.i === i + 1);
+    if (nxt && nxt.status === "done") {
+      blobUrl(nxt.i).then((u) => {
+        const o = other();
+        if (o.dataset.chunk !== String(nxt.i)) {
+          o.dataset.chunk = String(nxt.i);
+          o.src = u;
+        }
+      }).catch(() => {});
     }
   }
 })();
