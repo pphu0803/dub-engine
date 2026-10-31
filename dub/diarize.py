@@ -11,6 +11,10 @@ from . import audio
 _MODEL = None
 
 
+_CAMPLUS_URL = ("https://modelscope.cn/models/iic/speech_campplus_sv_zh-cn_16k-common/"
+                "resolve/master/campplus_cn_common.bin")
+
+
 def _model():
     global _MODEL
     if _MODEL is None:
@@ -20,10 +24,21 @@ def _model():
 
         from .campplus import CAMPPlus
 
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "models", "campplus_cn_common.bin")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "models", "campplus_cn_common.bin")
         if not os.path.exists(path):
-            raise RuntimeError(f"CAM++ 权重不存在：{path}（ModelScope iic/speech_campplus_sv_zh-cn_16k-common）")
+            # 首次使用自动下载（~28MB，ModelScope 国内直连快）
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            print("[diarize] 下载 CAM++ 声纹模型 (~28MB)…", flush=True)
+            import requests
+
+            r = requests.get(_CAMPLUS_URL, stream=True, timeout=(15, 120))
+            r.raise_for_status()
+            tmp = path + ".tmp"
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    f.write(chunk)
+            os.replace(tmp, path)
         m = CAMPPlus(feat_dim=80, embedding_size=192)
         m.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         m.eval()
