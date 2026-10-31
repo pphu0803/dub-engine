@@ -1,10 +1,11 @@
 /**
- * content.js — 纯 content script 架构（v0.3，无 background/SW）+ 分段流式播放
+ * content.js — 纯 content script 架构（v0.4，无 background/SW）+ 分段流式播放
  *
- * 引擎按 ~60s 静音点切段顺序处理：段 0 完成即开始播放，后面段落边播边出。
- * 播放器跟随 <video>：play/pause/seek/倍速全同步；seek 到未完成段自动
- * 回退原声（不静音），该段就绪后自动切回配音。
- * 音轨候选 = performance 资源历史 + video src + YT 特例（videoplayback/itag）。
+ * 播放器是双 Audio 元素乒乓：当前段播放时预载下一段，边界切换在已就绪的
+ * 元素上瞬时完成（v0.3 单元素换 src 会在加载窗口里丢播放——13 段攒出
+ * "配音比原片短"和"点播放没声音"两个症状的根因）。
+ * 时长对齐：loadedmetadata 后按 窗口/实际时长 微调 playbackRate（0.97~1.05）。
+ * seek 到未完成段自动回退原声，就绪后切回配音。
  */
 (() => {
   if (window.__dubInstalled) return;
@@ -39,7 +40,7 @@
   const btn = document.createElement("button");
   btn.textContent = "🎙 AI 配音";
   Object.assign(btn.style, {
-    position: "fixed", top: "12px", right: "12px", zIndex: 2147483647,
+    position: "fixed", top: "58px", right: "12px", zIndex: 2147483647, // pill 下方，不遮挡进度
     padding: "8px 16px", borderRadius: "999px", border: "0", cursor: "pointer",
     font: "600 13px/1.4 system-ui", color: "#04140c",
     background: "linear-gradient(135deg,#42e695,#3bb2b8)",
@@ -144,7 +145,15 @@
     poll();
   }
 
-  const player = { started: false, video: null, chunks: [], cur: -1, audio: new Audio() };
+  // ---------------------------------------------------------------- 播放器
+
+  const player = {
+    started: false, video: null, chunks: [], cur: -1, align: 1, curEl: 0,
+    elems: [new Audio(), new Audio()],
+  };
+  const el = () => player.elems[player.curEl];
+  const other = () => player.elems[1 - player.curEl];
+  const chunkUrl = (k) => `${SERVER}/api/job/${jobId}/audio/${k}`;
 
   async function poll() {
     let st;
@@ -157,7 +166,7 @@
     if (st.error && !st.status) { fail(st.error); return; }
     if (st.status === "error") { fail(st.error || "引擎出错"); return; }
 
-    const chunks = st.chunks || [];
+    const chunks = (st.chunks || []).map((c) => ({ ...c, url: chunkUrl(c.i) }));
     player.chunks = chunks;
     const doneN = chunks.filter((c) => c.status === "done").length;
 
@@ -169,7 +178,6 @@
         btn.style.display = "block";
       } else if (chunks.length) {
         startPlayer();
-        return;
       }
       return;
     }
@@ -178,15 +186,13 @@
         show(`⏳ ${st.stage === "extract" ? "抽取整轨" : st.stage || "处理中"}…`);
       } else {
         show(`⏳ 配音中 ${doneN}/${chunks.length} 段`);
+        if (player.started) syncNow(); // 新段就绪后，若正停在未完成段上则切回配音
       }
       if (!player.started && chunks[0] && chunks[0].status === "done") {
         startPlayer();
-        return;
       }
     }
   }
-
-  // ---------------------------------------------------------------- 播放
 
   function startPlayer() {
     const vids = [...document.querySelectorAll("video")].filter((v) => v.duration > 0 || v.src || v.currentSrc);
@@ -196,11 +202,11 @@
     player.video = video;
     video.muted = true;
     bind(video);
-    if (!video.paused) player.audio.play().catch(() => {});
     show("🔊 AI 配音播放中（分段流式；未完成段自动回退原声）");
     btn.textContent = "🎙 重新配音";
     btn.style.display = "block";
-    syncNow();
+    syncNow(true);
+    ensurePlaying();
   }
 
   let bound = false;
@@ -208,39 +214,96 @@
   function bind(video) {
     if (bound) return;
     bound = true;
-    video.addEventListener("play", () => { syncNow(); player.audio.play().catch(() => {}); });
-    video.addEventListener("pause", () => player.audio.pause());
-    video.addEventListener("seeked", () => syncNow());
-    video.addEventListener("ratechange", () => { player.audio.playbackRate = video.playbackRate; });
-    video.addEventListener("timeupdate", () => syncNow());
+    video.addEventListener("play", () => { syncNow(true); ensurePlaying(); });
+    video.addEventListener("pause", () => el().pause());
+    video.addEventListener("seeked", () => { syncNow(true); ensurePlaying(); });
+    video.addEventListener("ratechange", () => { el().playbackRate = video.playbackRate * player.align; });
+    video.addEventListener("timeupdate", () => syncNow(false));
+  }
+
+  function ensurePlaying() {
+    const a = el();
+    const go = () => {
+      if (player.video && !player.video.paused && a.paused) {
+        a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000));
+      }
+    };
+    if (a.readyState >= 2) go();
+    else a.addEventListener("canplaythrough", go, { once: true });
   }
 
   function chunkAt(t) {
     return player.chunks.find((c) => t >= c.start - 0.05 && t < c.end + 0.05);
   }
 
-  function syncNow() {
+  function applyAlign(a, c) {
+    if (a.duration && isFinite(a.duration)) {
+      const w = c.end - c.start;
+      const r = Math.min(1.05, Math.max(0.97, w / a.duration));
+      player.align = Math.abs(r - 1) > 0.004 ? r : 1;
+      a.playbackRate = player.video.playbackRate * player.align;
+    }
+  }
+
+  function syncNow(force) {
     if (!player.started || !player.video) return;
     const video = player.video;
     const t = video.currentTime;
     const c = chunkAt(t);
     if (!c) return;
     if (c.status !== "done") {
-      // 未完成段：退回原声，等后台出活
-      player.audio.pause();
+      // 未完成段：退回原声，等后台出活（poll 里新段就绪会再触发 syncNow）
+      el().pause();
       player.cur = -1;
       video.muted = false;
       show(`⏳ 第 ${c.i + 1} 段处理中——此处先听原声`);
       return;
     }
-    if (player.cur !== c.i) {
+
+    const needSwitch = player.cur !== c.i;
+    if (needSwitch || force) {
+      const off = Math.max(0, t - c.start);
+      const nEl = other();
+      const preloaded = nEl.src.endsWith(`/audio/${c.i}`) && nEl.readyState >= 2;
+      if (needSwitch && preloaded) {
+        // 乒乓切换：预载好的元素瞬时接管，无加载缺口
+        el().pause();
+        nEl.playbackRate = video.playbackRate * player.align;
+        nEl.currentTime = off;
+        if (!video.paused) nEl.play().catch((e) => show("❌ 换段播放失败：" + e.message, 6000));
+        player.curEl = 1 - player.curEl;
+      } else {
+        const a = el();
+        if (needSwitch || !a.src.includes(`/audio/${c.i}`)) {
+          a.src = chunkUrl(c.i);
+          a.addEventListener("loadedmetadata", () => applyAlign(a, c), { once: true });
+        }
+        a.playbackRate = video.playbackRate * player.align;
+        const go = () => {
+          if (player.cur !== c.i && !force) return;
+          a.currentTime = off;
+          if (!video.paused) a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000));
+        };
+        if (a.readyState >= 2) go();
+        else a.addEventListener("canplaythrough", go, { once: true });
+      }
       player.cur = c.i;
-      player.audio.src = `${SERVER}/api/job/${jobId}/audio/${c.i}`;
-      player.audio.currentTime = Math.max(0, t - c.start);
-      if (!video.paused) player.audio.play().catch(() => {});
-    } else if (!video.paused && Math.abs(player.audio.currentTime - (t - c.start)) > 0.35) {
-      player.audio.currentTime = t - c.start;
+      video.muted = true;
+      // 预载下一段到另一个元素
+      const nxt = player.chunks.find((x) => x.i === c.i + 1);
+      if (nxt && nxt.status === "done") {
+        const o = other();
+        if (!o.src.endsWith(`/audio/${nxt.i}`)) o.src = nxt.url;
+      }
+    } else if (!video.paused) {
+      const a = el();
+      const off = t - c.start;
+      if (a.paused) {
+        a.currentTime = Math.max(0, off);
+        a.play().catch(() => {});
+      } else if (Math.abs(a.currentTime - off) > 0.35) {
+        a.currentTime = Math.max(0, off);
+      }
     }
-    video.muted = true;
   }
 })();

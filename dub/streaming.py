@@ -146,7 +146,7 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
     """线程主体。job dict 由 serve 持有，状态同时落盘以便续跑/秒回。"""
     t0 = time.perf_counter()
     base = os.path.splitext(os.path.basename(src))[0]
-    job_dir = os.path.join(workdir, "stream", f"{base}_{lang}_{tts_backend}")
+    job_dir = os.path.join(workdir, "work", "stream", f"{base}_{lang}_{tts_backend}")
     os.makedirs(job_dir, exist_ok=True)
     job["dir"] = job_dir
     state_path = os.path.join(job_dir, "state.json")
