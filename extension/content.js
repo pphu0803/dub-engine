@@ -16,8 +16,10 @@
 
   const SERVER = "http://127.0.0.1:8765";
   const MEDIA_RE = /\.(m4s|mp4|m4a|aac|webm|mp3|ogg|wav|flac)(\?|#|$)/i;
+  // 无扩展名的流式端点（YouTube googlevideo 的 /videoplayback 等）
+  const STREAM_RE = /videoplayback\?/i;
   const PLAYLIST_RE = /\.(m3u8|mpd)(\?|#|$)/i;
-  const AUDIO_HINT = /(audio|aud|aac|m4a|mp3|wav|ogg|flac|dash_audio|_140|_251|30280|30216|30232)/i;
+  const AUDIO_HINT = /(audio|aud|aac|m4a|mp3|wav|ogg|flac|dash_audio|_140|_251|30280|30216|30232|itag=140|itag=139|itag=141|itag=599|itag=600)/i;
   const STAGE_ZH = {
     extract: "抽音轨", separate: "Demucs 分离", asr: "Whisper 识别",
     translate: "LLM 翻译", tts: "配音合成", assemble: "混音", encode: "转码",
@@ -61,15 +63,16 @@
   // ------------------------------------------------------------- 音轨挑选
 
   function sniff() {
+    const isMedia = (u) => MEDIA_RE.test(u) || STREAM_RE.test(u);
     const out = [];
     for (const e of performance.getEntriesByType("resource")) {
       const u = e.name;
-      if (!/^https?:/.test(u) || PLAYLIST_RE.test(u) || !MEDIA_RE.test(u)) continue;
+      if (!/^https?:/.test(u) || PLAYLIST_RE.test(u) || !isMedia(u)) continue;
       out.push({ url: u, size: e.transferSize || 0, forced: false });
     }
     document.querySelectorAll("video,audio,source").forEach((el) => {
       for (const u of [el.src, el.currentSrc]) {
-        if (u && /^https?:/.test(u) && MEDIA_RE.test(u) && !PLAYLIST_RE.test(u)) {
+        if (u && /^https?:/.test(u) && isMedia(u) && !PLAYLIST_RE.test(u)) {
           out.push({ url: u, size: 0, forced: false });
         }
       }
@@ -89,6 +92,7 @@
         let s = 0;
         if (c.forced) s += 10;
         if (AUDIO_HINT.test(c.url)) s += 2;
+        if (/itag=(140|139|141|599|600)\b/i.test(c.url)) s += 2; // YT 音频 itag，独立加分
         if (/\.(m4a|aac|mp3|flac|ogg|wav)(\?|#|$)/i.test(c.url)) s += 1;
         if (/\.m4s(\?|#|$)/i.test(c.url)) s += 1;
         if (c.size > 300 * 1024) s += 2;
