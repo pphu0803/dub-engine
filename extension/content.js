@@ -116,7 +116,9 @@
     document.querySelectorAll("video,audio,source").forEach((el) => {
       for (const u of [el.src, el.currentSrc]) {
         if (u && /^https?:/.test(u) && isMedia(u) && !PLAYLIST_RE.test(u)) {
-          out.push({ url: u, size: 0, forced: false });
+          // 媒体元素正在播的直链是强信号：B 站番剧试看等渐进式 mp4 页面
+          // 没有 DASH 音轨可挑，只有这一条路
+          out.push({ url: u, size: 0, forced: false, fromVideo: el.tagName === "VIDEO" });
         }
       }
     });
@@ -134,6 +136,7 @@
       .map((c) => {
         let s = 0;
         if (c.forced) s += 10;
+        if (c.fromVideo) s += 3;
         if (AUDIO_HINT.test(c.url)) s += 2;
         if (/itag=(140|139|141|599|600)\b/i.test(c.url)) s += 2;
         if (/\.(m4a|aac|mp3|flac|ogg|wav)(\?|#|$)/i.test(c.url.split("?")[0])) s += 1;
@@ -141,7 +144,7 @@
         if (c.size > 300 * 1024) s += 2;
         return { ...c, s };
       })
-      .filter((c) => c.s >= 3 && (c.forced || AUDIO_HINT.test(c.url)))
+      .filter((c) => c.s >= 3 && (c.forced || c.fromVideo || AUDIO_HINT.test(c.url)))
       .sort((a, b) => b.s - a.s);
     return ok[0] || null;
   }
