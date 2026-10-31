@@ -1,11 +1,10 @@
 /**
- * content.js — 纯 content script 架构（v0.2，无 background/SW）
+ * content.js — 纯 content script 架构（v0.3，无 background/SW）+ 分段流式播放
  *
- * 为什么没有 SW：MV3 service worker 闲置 30s 被杀，消息链/长驻轮询全部
- * 不可靠（v0.1 三次真机翻车的根因）。本页面自己就是司机：
- *   音轨候选 = performance 资源历史（含 transferSize）+ video src + YT 特例
- *   请求     = 直接 fetch http://127.0.0.1:8765（CORS+PNA 由引擎响应头解决）
- *   播放     = blob URL + Audio 元素随 <video> 同步
+ * 引擎按 ~60s 静音点切段顺序处理：段 0 完成即开始播放，后面段落边播边出。
+ * 播放器跟随 <video>：play/pause/seek/倍速全同步；seek 到未完成段自动
+ * 回退原声（不静音），该段就绪后自动切回配音。
+ * 音轨候选 = performance 资源历史 + video src + YT 特例（videoplayback/itag）。
  */
 (() => {
   if (window.__dubInstalled) return;
@@ -16,14 +15,9 @@
 
   const SERVER = "http://127.0.0.1:8765";
   const MEDIA_RE = /\.(m4s|mp4|m4a|aac|webm|mp3|ogg|wav|flac)(\?|#|$)/i;
-  // 无扩展名的流式端点（YouTube googlevideo 的 /videoplayback 等）
   const STREAM_RE = /videoplayback\?/i;
   const PLAYLIST_RE = /\.(m3u8|mpd)(\?|#|$)/i;
   const AUDIO_HINT = /(audio|aud|aac|m4a|mp3|wav|ogg|flac|dash_audio|_140|_251|30280|30216|30232|itag=140|itag=139|itag=141|itag=599|itag=600)/i;
-  const STAGE_ZH = {
-    extract: "抽音轨", separate: "Demucs 分离", asr: "Whisper 识别",
-    translate: "LLM 翻译", tts: "配音合成", assemble: "混音", encode: "转码",
-  };
 
   // ------------------------------------------------------------------ UI
 
@@ -92,13 +86,12 @@
         let s = 0;
         if (c.forced) s += 10;
         if (AUDIO_HINT.test(c.url)) s += 2;
-        if (/itag=(140|139|141|599|600)\b/i.test(c.url)) s += 2; // YT 音频 itag，独立加分
+        if (/itag=(140|139|141|599|600)\b/i.test(c.url)) s += 2;
         if (/\.(m4a|aac|mp3|flac|ogg|wav)(\?|#|$)/i.test(c.url)) s += 1;
         if (/\.m4s(\?|#|$)/i.test(c.url)) s += 1;
         if (c.size > 300 * 1024) s += 2;
         return { ...c, s };
       })
-      // 资格线：必须有音频特征（video m4s 只有 m4s+体积，混不进来）
       .filter((c) => c.s >= 3 && (c.forced || AUDIO_HINT.test(c.url)))
       .sort((a, b) => b.s - a.s);
     return ok[0] || null;
@@ -124,11 +117,11 @@
     show("读页面记录…");
     const c = pick();
     if (!c) {
-      fail("没找到像音轨的请求——重新打开视频页、播放 2 秒再试（按 F12 → Network 应能看到 .m4s）");
+      fail("没找到像音轨的请求——重新打开视频页、播放 2 秒再试");
       return;
     }
     console.log("[dub] 音轨:", c.url, "score", c.s);
-    show("⏳ 排队…");
+    show("⏳ 提交引擎…");
     let job;
     try {
       const r = await xfetch(SERVER + "/api/dub", {
@@ -151,6 +144,8 @@
     poll();
   }
 
+  const player = { started: false, video: null, chunks: [], cur: -1, audio: new Audio() };
+
   async function poll() {
     let st;
     try {
@@ -159,50 +154,93 @@
     } catch (_) {
       return; // 引擎忙/瞬时失联，下轮再试
     }
+    if (st.error && !st.status) { fail(st.error); return; }
     if (st.status === "error") { fail(st.error || "引擎出错"); return; }
+
+    const chunks = st.chunks || [];
+    player.chunks = chunks;
+    const doneN = chunks.filter((c) => c.status === "done").length;
+
     if (st.status === "done") {
       clearInterval(timer);
-      show("⏳ 取回音频…");
-      try {
-        const r = await xfetch(`${SERVER}/api/job/${jobId}/audio`, {}, 60000);
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const blob = await r.blob();
-        attach(URL.createObjectURL(blob));
-      } catch (e) {
-        fail("取音频失败：" + e.message);
+      if (player.started) {
+        show(`✅ 全部 ${chunks.length} 段完成（用时 ${st.total_s || "?"}s）`, 8000);
+        btn.textContent = "🎙 重新配音";
+        btn.style.display = "block";
+      } else if (chunks.length) {
+        startPlayer();
+        return;
       }
       return;
     }
-    show(`⏳ ${STAGE_ZH[st.stage] || st.stage || "处理中"}`);
+    if (st.status === "running") {
+      if (!chunks.length) {
+        show(`⏳ ${st.stage === "extract" ? "抽取整轨" : st.stage || "处理中"}…`);
+      } else {
+        show(`⏳ 配音中 ${doneN}/${chunks.length} 段`);
+      }
+      if (!player.started && chunks[0] && chunks[0].status === "done") {
+        startPlayer();
+        return;
+      }
+    }
   }
 
   // ---------------------------------------------------------------- 播放
 
-  function attach(url) {
+  function startPlayer() {
     const vids = [...document.querySelectorAll("video")].filter((v) => v.duration > 0 || v.src || v.currentSrc);
     const video = vids.sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
     if (!video) { show("页面上没找到 <video>", 6000); btn.style.display = "block"; return; }
+    player.started = true;
+    player.video = video;
     video.muted = true;
-    const audio = new Audio(url);
-    audio.preload = "auto";
-    sync(video, audio);
-    if (!video.paused) { audio.currentTime = video.currentTime; audio.play().catch(() => {}); }
-    // 成功提示常驻（视频暂停时也要让人看见）
-    show("🔊 AI 配音已就绪，原声已静音" + (video.paused ? " —— 点播放开始" : ""));
+    bind(video);
+    if (!video.paused) player.audio.play().catch(() => {});
+    show("🔊 AI 配音播放中（分段流式；未完成段自动回退原声）");
     btn.textContent = "🎙 重新配音";
     btn.style.display = "block";
+    syncNow();
   }
 
-  function sync(video, audio) {
-    const follow = () => {
-      if (!video.paused && Math.abs(audio.currentTime - video.currentTime) > 0.35) {
-        audio.currentTime = video.currentTime;
-      }
-    };
-    video.addEventListener("play", () => { audio.currentTime = video.currentTime; audio.play(); });
-    video.addEventListener("pause", () => audio.pause());
-    video.addEventListener("seeked", () => { audio.currentTime = video.currentTime; });
-    video.addEventListener("ratechange", () => { audio.playbackRate = video.playbackRate; });
-    video.addEventListener("timeupdate", follow);
+  let bound = false;
+
+  function bind(video) {
+    if (bound) return;
+    bound = true;
+    video.addEventListener("play", () => { syncNow(); player.audio.play().catch(() => {}); });
+    video.addEventListener("pause", () => player.audio.pause());
+    video.addEventListener("seeked", () => syncNow());
+    video.addEventListener("ratechange", () => { player.audio.playbackRate = video.playbackRate; });
+    video.addEventListener("timeupdate", () => syncNow());
+  }
+
+  function chunkAt(t) {
+    return player.chunks.find((c) => t >= c.start - 0.05 && t < c.end + 0.05);
+  }
+
+  function syncNow() {
+    if (!player.started || !player.video) return;
+    const video = player.video;
+    const t = video.currentTime;
+    const c = chunkAt(t);
+    if (!c) return;
+    if (c.status !== "done") {
+      // 未完成段：退回原声，等后台出活
+      player.audio.pause();
+      player.cur = -1;
+      video.muted = false;
+      show(`⏳ 第 ${c.i + 1} 段处理中——此处先听原声`);
+      return;
+    }
+    if (player.cur !== c.i) {
+      player.cur = c.i;
+      player.audio.src = `${SERVER}/api/job/${jobId}/audio/${c.i}`;
+      player.audio.currentTime = Math.max(0, t - c.start);
+      if (!video.paused) player.audio.play().catch(() => {});
+    } else if (!video.paused && Math.abs(player.audio.currentTime - (t - c.start)) > 0.35) {
+      player.audio.currentTime = t - c.start;
+    }
+    video.muted = true;
   }
 })();

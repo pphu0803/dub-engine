@@ -1,11 +1,13 @@
 """dub serve — 本地 HTTP 服务，浏览器插件的后端。只绑 127.0.0.1。
 
   POST /api/dub           {"url": "...", "referer": "..."} 或 {"path": "本地文件"}
-  GET  /api/job/<id>      {status, stage, error, segments, timings}
-  GET  /api/job/<id>/audio 成品 mp3（job 完成后）
+  GET  /api/job/<id>            {status, stage, chunks[], duration, error}
+  GET  /api/job/<id>/audio/<k>  第 k 段 mp3（该段 done 即可取）
+  GET  /api/job/<id>/audio      整轨 mp3（全部完成后）
 
-GPU 串行：同时只跑一个 job，其余 409。所有响应带 CORS + PNA 头
-（https 页面经 service worker 访问 http://127.0.0.1 的预检要求）。
+流水线为分块流式（dub/streaming.py）：段 0 最先出声，后台顺序推进；
+任务目录按 内容哈希+语言+后端 命名，重复请求同一内容直接秒回。
+GPU 串行：同时只跑一个 job，其余排队。
 """
 
 from __future__ import annotations
@@ -13,14 +15,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import threading
-import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from .pipeline import Options, Runner
+from . import streaming
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -28,6 +28,7 @@ UA = (
 )
 
 JOBS: dict[str, dict] = {}
+JOBS_BY_KEY: dict[str, str] = {}
 _ACTIVE = threading.Lock()  # 同一时间只允许一个 job 占 GPU
 
 
@@ -68,47 +69,6 @@ def _download(url: str, referer: str, dst: str) -> int:
     return n
 
 
-def _to_mp3(wav: str, mp3: str) -> None:
-    import imageio_ffmpeg
-
-    subprocess.run(
-        [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
-         "-i", wav, "-codec:a", "libmp3lame", "-qscale:a", "2", mp3],
-        check=True,
-    )
-
-
-def _run_job(job: dict) -> None:
-    with _ACTIVE:
-        try:
-            o = job["opts"]
-
-            def on_stage(name: str, ev: str, dt: float = 0.0) -> None:
-                if ev == "start":
-                    job["stage"] = name
-
-            runner = Runner(o, on_stage=on_stage)
-            summary = runner.run()
-            job["stage"] = "encode"
-            wav = os.path.join(runner.work, "final.wav")
-            mp3 = wav[:-4] + ".mp3"
-            _to_mp3(wav, mp3)
-            segs = json.load(open(os.path.join(runner.work, "trans.json"), encoding="utf-8"))
-            job.update(
-                status="done",
-                stage="done",
-                audio=mp3,
-                duration=summary.get("total_s"),
-                segments=[
-                    {"start": s["start"], "end": s["end"], "text": s["translated"] or s["text"]}
-                    for s in segs
-                ],
-                timings=summary.get("timings"),
-            )
-        except Exception as exc:
-            job.update(status="error", error=f"{type(exc).__name__}: {exc}")
-
-
 def _content_key(fp: str) -> str:
     import hashlib
 
@@ -124,8 +84,8 @@ def _content_key(fp: str) -> str:
 
 def _fetch_audio(url: str, referer: str, workdir: str) -> str:
     """下载音轨并按内容哈希落盘。同一内容无论 URL 怎么变（YT 每次加载
-    重签名、B 站过期参数）都复用同一文件——管线缓存键才稳定，刷新页面
-    重配音才不会全量重跑。URL 索引让完全相同的 URL 连下载都省掉。"""
+    重签名、B 站过期参数）都复用同一文件——任务缓存键才稳定。URL 索引
+    让完全相同的 URL 连下载都省掉。"""
     dldir = os.path.join(workdir, "dl")
     os.makedirs(dldir, exist_ok=True)
     idx_path = os.path.join(dldir, "dl_index.json")
@@ -165,28 +125,44 @@ def start_job(payload: dict, workdir: str) -> dict:
             raise ValueError("需要 url 或 path")
         src = _fetch_audio(url, payload.get("referer", ""), workdir)
 
-    out_dir = os.path.join(workdir, "out")
-    os.makedirs(out_dir, exist_ok=True)
-    opts = Options(
-        input=src,
-        out=os.path.join(out_dir, f"{uuid.uuid4().hex[:8]}.wav"),
-        lang=payload.get("lang", "zh"),
-        source_lang=payload.get("source_lang", ""),
-        asr_backend=payload.get("asr_backend", "transformers"),
-        mt_backend="llm",
-        tts_backend=payload.get("tts_backend", "edge"),
-        chars_per_sec=float(payload.get("chars_per_sec", 4.5)),
-        workdir=os.path.join(workdir, "work"),
-    )
+    lang = payload.get("lang", "zh")
+    tts_backend = payload.get("tts_backend", "edge")
+    key = f"{os.path.splitext(os.path.basename(src))[0]}_{lang}_{tts_backend}"
+
+    if key in JOBS_BY_KEY:
+        job = JOBS[JOBS_BY_KEY[key]]
+        return {"job_id": job["id"], "status": job["status"],
+                "cached": job["status"] == "done", "chunks_done": job.get("chunks_done", 0)}
+
     jid = uuid.uuid4().hex[:8]
-    job = {"id": jid, "status": "running", "stage": "queued", "src": src, "opts": opts}
+    job = {
+        "id": jid, "key": key, "status": "running", "stage": "queued",
+        "chunks": [], "chunks_done": 0, "src": src, "lang": lang,
+        "source_lang": payload.get("source_lang", ""),
+        "tts_backend": tts_backend,
+    }
     JOBS[jid] = job
-    threading.Thread(target=_run_job, args=(job,), daemon=True).start()
-    return job
+    JOBS_BY_KEY[key] = jid
+
+    def run() -> None:
+        with _ACTIVE:
+            try:
+                streaming.run_job(
+                    job, src, lang, job["source_lang"], tts_backend, workdir,
+                    api_base=os.environ.get("DUB_LLM_BASE", ""),
+                    api_key=os.environ.get("DUB_LLM_KEY", ""),
+                    llm_model=os.environ.get("DUB_LLM_MODEL", ""),
+                )
+            except Exception as exc:
+                job["status"] = "error"
+                job["error"] = f"{type(exc).__name__}: {exc}"
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": jid, "status": job["status"], "cached": False, "chunks_done": 0}
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "dub-serve/0.1"
+    server_version = "dub-serve/0.2"
 
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -199,6 +175,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self._cors()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _file(self, fp: str, mime: str) -> None:
+        body = open(fp, "rb").read()
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -221,34 +206,45 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
             return
-        self._json({"job_id": job["id"], "status": job["status"]})
+        self._json(job)
 
     def do_GET(self) -> None:
         parts = self.path.strip("/").split("/")
-        # /api/job/<id> | /api/job/<id>/audio
+        if self.path == "/api/health":
+            self._json({"ok": True})
+            return
+        # /api/job/<id> | /api/job/<id>/audio | /api/job/<id>/audio/<k>
         if len(parts) >= 3 and parts[:2] == ["api", "job"]:
             job = JOBS.get(parts[2])
             if not job:
                 self._json({"error": "no such job"}, 404)
                 return
             if len(parts) == 4 and parts[3] == "audio":
-                fp = job.get("audio", "")
+                fp = os.path.join(job.get("dir", ""), "final.mp3")
                 if job["status"] != "done" or not os.path.exists(fp):
-                    self._json({"error": "audio not ready"}, 409)
+                    self._json({"error": "final not ready"}, 409)
                     return
-                body = open(fp, "rb").read()
-                self.send_response(200)
-                self._cors()
-                self.send_header("Content-Type", "audio/mpeg")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._file(fp, "audio/mpeg")
                 return
-            self._json({k: job.get(k) for k in
-                        ("id", "status", "stage", "error", "segments", "timings", "duration")})
-            return
-        if self.path == "/api/health":
-            self._json({"ok": True})
+            if len(parts) == 5 and parts[3] == "audio":
+                chunks = job.get("chunks") or []
+                k = int(parts[4])
+                ch = chunks[k] if k < len(chunks) else {}
+                if ch.get("status") != "done" or not ch.get("mp3"):
+                    self._json({"error": "chunk not ready"}, 409)
+                    return
+                self._file(ch["mp3"], "audio/mpeg")
+                return
+            self._json({
+                "id": job["id"], "status": job["status"], "stage": job.get("stage"),
+                "error": job.get("error"), "duration": job.get("duration"),
+                "chunks": [
+                    {"i": c["i"], "start": round(c["start"], 2), "end": round(c["end"], 2),
+                     "status": c["status"]}
+                    for c in (job.get("chunks") or [])
+                ],
+                "total_s": job.get("total_s"), "segments_total": job.get("segments_total"),
+            })
             return
         self._json({"error": "not found"}, 404)
 
