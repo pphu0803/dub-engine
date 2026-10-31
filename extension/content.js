@@ -205,7 +205,39 @@
     started: false, video: null, chunks: [], cur: -1, align: 1, curEl: 0,
     mode: "dub", // dub | orig
     elems: [new Audio(), new Audio()], blobs: {}, // k -> objectURL
+    dubDuration: 0, // 当前配音对应的视频时长（媒体身份锚点，换集检测用）
   };
+
+  // 连播换集：B 站自动播下一集时同一页面换源，配音还是上一集的 → 立即
+  // 停配音、放开原声、重置状态。时长差 >3s 判为不同媒体（URL 不可靠：
+  // YT 拖进度条也改 URL）。同集内换清晰度时长不变，不会误触发。
+  function resetForNewMedia() {
+    if (timer) { clearInterval(timer); timer = null; }
+    try { el().pause(); other().pause(); } catch (_) {}
+    for (const u of Object.values(player.blobs)) URL.revokeObjectURL(u);
+    const v = biggestVideo();
+    if (v) v.muted = false;
+    player.started = false;
+    player.video = null;
+    player.chunks = [];
+    player.cur = -1;
+    player.curEl = 0;
+    player.blobs = {};
+    player.align = 1;
+    player.dubDuration = 0;
+    jobId = null;
+    tgl.style.display = "none";
+    tgl.textContent = "🔈 切回原声";
+    btn.textContent = "🎙 AI 配音";
+    btn.style.display = "block";
+    show("⚠️ 检测到视频已切换（自动连播下一集）——配音是上一集的，已切回原声。点「AI 配音」为新视频配音", 12000);
+  }
+
+  function mediaChanged(v) {
+    return player.started && player.dubDuration > 0 &&
+      v && isFinite(v.duration) && v.duration > 0 &&
+      Math.abs(v.duration - player.dubDuration) > 3;
+  }
   const el = () => player.elems[player.curEl];
   const other = () => player.elems[1 - player.curEl];
 
@@ -230,6 +262,9 @@
     } catch (_) {
       return; // 引擎忙/瞬时失联，下轮再试
     }
+    if (st.duration) player.dubDuration = st.duration;
+    // 兜底：loadedmetadata 若错过（绑定晚于换源），轮询时再核一次时长
+    if (mediaChanged(player.video || biggestVideo())) { resetForNewMedia(); return; }
     if (st.error && !st.status) { fail(st.error); return; }
     if (st.status === "error") { fail(st.error || "引擎出错"); return; }
 
@@ -303,16 +338,18 @@
     ensurePlaying();
   }
 
-  let bound = false;
-
   function bind(video) {
-    if (bound) return;
-    bound = true;
+    if (video.__dubBound) return;
+    video.__dubBound = true;
     video.addEventListener("play", () => { syncNow(true); ensurePlaying(); });
     video.addEventListener("pause", () => el().pause());
     video.addEventListener("seeked", () => { syncNow(true); ensurePlaying(); });
     video.addEventListener("ratechange", () => { el().playbackRate = video.playbackRate * player.align; });
     video.addEventListener("timeupdate", () => syncNow(false));
+    // 换源完成（连播下一集/切视频）：元数据一到就核对时长，对不上立刻止损
+    video.addEventListener("loadedmetadata", () => {
+      if (mediaChanged(video)) resetForNewMedia();
+    });
   }
 
   function ensurePlaying() {
