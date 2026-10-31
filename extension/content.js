@@ -221,7 +221,11 @@
   async function poll() {
     let st;
     try {
-      const r = await xfetch(`${SERVER}/api/job/${jobId}`);
+      // 轮询捎带当前播放位置：引擎优先配"离你最近的段"（拖到哪配到哪）
+      const v = player.video || biggestVideo();
+      const t = v && isFinite(v.currentTime) ? v.currentTime : -1;
+      const q = t >= 0 ? `?t=${t.toFixed(1)}` : "";
+      const r = await xfetch(`${SERVER}/api/job/${jobId}${q}`);
       st = await r.json();
     } catch (_) {
       return; // 引擎忙/瞬时失联，下轮再试
@@ -248,7 +252,7 @@
       // 部分段失败：已完成的照常可听，点「重新配音」续跑失败段
       clearInterval(timer);
       const badN = chunks.filter((c) => c.status === "error").length;
-      if (!player.started && chunks[0] && chunks[0].status === "done") startPlayer();
+      if (!player.started && chunks.some((c) => c.status === "done")) startPlayer();
       show(`⚠️ ${doneN}/${chunks.length} 段完成，${badN} 段失败——点「重新配音」重试失败段`, 15000);
       btn.textContent = "🎙 重新配音";
       btn.style.display = "block";
@@ -261,15 +265,30 @@
         show(`⏳ 配音中 ${doneN}/${chunks.length} 段`);
         if (player.started) syncNow(); // 新段就绪后，若正停在未完成段上则切回配音
       }
-      if (!player.started && chunks[0] && chunks[0].status === "done") {
+      if (!player.started && readyAt(chunks)) {
         startPlayer();
       }
     }
   }
 
+  function biggestVideo() {
+    return [...document.querySelectorAll("video")]
+      .filter((v) => v.duration > 0 || v.src || v.currentSrc)
+      .sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0] || null;
+  }
+
+  // 起播门控：播放头所在段就绪即可开播（拖到哪，先出哪的声）。
+  // 找不到 video 或位置不在任何段内，退回旧的"段 0 完成"判定
+  function readyAt(chunks) {
+    const v = player.video || biggestVideo();
+    if (!v) return !!(chunks[0] && chunks[0].status === "done");
+    const t = v.currentTime;
+    const c = chunks.find((x) => t >= x.start - 0.05 && t < x.end + 0.05);
+    return c ? c.status === "done" : !!(chunks[0] && chunks[0].status === "done");
+  }
+
   function startPlayer() {
-    const vids = [...document.querySelectorAll("video")].filter((v) => v.duration > 0 || v.src || v.currentSrc);
-    const video = vids.sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
+    const video = biggestVideo();
     if (!video) { show("页面上没找到 <video>", 6000); btn.style.display = "block"; return; }
     player.started = true;
     player.video = video;

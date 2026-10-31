@@ -281,8 +281,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json(job)
 
     def do_GET(self) -> None:
-        parts = self.path.strip("/").split("/")
-        if self.path == "/api/health":
+        path, _, qs = self.path.partition("?")
+        parts = path.strip("/").split("/")
+        if path == "/api/health":
             self._json({"ok": True})
             return
         # /api/job/<id> | /api/job/<id>/audio | /api/job/<id>/audio/<k>
@@ -291,6 +292,13 @@ class Handler(BaseHTTPRequestHandler):
             if not job:
                 self._json({"error": "no such job"}, 404)
                 return
+            # 轮询捎带播放位置（?t=秒）→ 驱动"离播放头最近的段先配"调度
+            m = re.search(r"(?:^|&)t=([0-9.]+)", qs)
+            if m:
+                try:
+                    job["pos"] = max(0.0, float(m.group(1)))
+                except ValueError:
+                    pass
             if len(parts) == 4 and parts[3] == "audio":
                 fp = os.path.join(job.get("dir", ""), "final.mp3")
                 if job["status"] != "done" or not os.path.exists(fp):

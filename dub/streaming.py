@@ -153,6 +153,20 @@ def _mix_chunk(bed_path: str, segs: list, out_wav: str, gain: float,
     audio.save(out_wav, np.clip(mix, -1.0, 1.0), sr)
 
 
+def _pick_next(todo: list[dict], pos: float | None) -> dict:
+    """挑下一个要配的段。无位置信息按播放顺序；有位置则**离播放头最近的段优先**
+    （播放头落在段内距离记 0；同距偏向前方——用户更可能继续往后看）。
+    这解决"用户已看到 6 分钟，流水线还在配 2 分钟"的错位。"""
+    if pos is None:
+        return todo[0]
+
+    def dist(c: dict) -> float:
+        d = min(max(pos, c["start"]), c["end"]) - pos
+        return abs(d) + (0.0 if c["end"] > pos else 0.5)
+
+    return min(todo, key=dist)
+
+
 def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
             workdir: str, api_base: str = "", api_key: str = "", llm_model: str = "",
             mimo_base: str = "", mimo_key: str = "") -> None:
@@ -253,11 +267,14 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
 
     errors: dict[int, str] = {}
     for round_no in (1, 2):  # 第二遍只重试第一遍失败的段
-        for ch in state["chunks"]:
-            if ch["status"] == "done":
-                continue
-            if round_no == 2 and ch["i"] not in errors:
-                continue
+        if round_no == 1:
+            todo = [c for c in state["chunks"] if c["status"] != "done"]
+        else:
+            todo = [c for c in state["chunks"] if c["i"] in errors]
+        while todo:
+            # 每次挑段都重读播放位置：用户中途拖动，调度跟着改主意
+            ch = _pick_next(todo, job.get("pos"))
+            todo = [c for c in todo if c is not ch]
             try:
                 process_chunk(ch)
                 errors.pop(ch["i"], None)
