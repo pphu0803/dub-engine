@@ -154,7 +154,8 @@ def _mix_chunk(bed_path: str, segs: list, out_wav: str, gain: float,
 
 
 def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
-            workdir: str, api_base: str = "", api_key: str = "", llm_model: str = "") -> None:
+            workdir: str, api_base: str = "", api_key: str = "", llm_model: str = "",
+            mimo_base: str = "", mimo_key: str = "") -> None:
     """线程主体。job dict 由 serve 持有，状态同时落盘以便续跑/秒回。"""
     t0 = time.perf_counter()
     base = os.path.splitext(os.path.basename(src))[0]
@@ -235,7 +236,8 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
         stages.translate(segs, backend="llm", target=lang, chars_per_sec=cps,
                          api_base=api_base, api_key=api_key, model=llm_model)
         stages.tts(segs, os.path.join(cdir, "tts"), backend=tts_backend,
-                   lang=lang, profiles=reg.profiles)
+                   lang=lang, profiles=reg.profiles,
+                   mimo_cfg={"base": mimo_base, "key": mimo_key})
 
         _mix_chunk(bed, segs, os.path.join(cdir, "chunk.wav"), gain)
         mp3 = os.path.join(cdir, "chunk.mp3")

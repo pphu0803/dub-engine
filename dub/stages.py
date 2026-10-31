@@ -565,9 +565,31 @@ EDGE_VOICE_BY_PROFILE = {
 }
 
 
+# MiMo 音色（小米云端，24kHz WAV，见 dub/mimo.py）。性别映射是保守猜测，
+# 待耳朵校准后改这张表；ja/ko 未测，先落 mimo_default。
+MIMO_VOICE_BY_PROFILE = {
+    "zh": {
+        ("m", "child"): "苏打",
+        ("m", "young"): "苏打",
+        ("m", "mature"): "白桦",
+        ("f", "child"): "茉莉",
+        ("f", "young"): "茉莉",
+        ("f", "mature"): "茉莉",
+    },
+    "en": {
+        ("m", "child"): "Milo",
+        ("m", "young"): "Milo",
+        ("m", "mature"): "Dean",
+        ("f", "child"): "Mia",
+        ("f", "young"): "Mia",
+        ("f", "mature"): "Mia",
+    },
+}
+
+
 def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str = "",
         device: str = "auto", ref_wav: str = "", lang: str = "zh",
-        profiles: dict | None = None) -> Stats:
+        profiles: dict | None = None, mimo_cfg: dict | None = None) -> Stats:
     os.makedirs(out_dir, exist_ok=True)
     stats = Stats(segments=len(segments))
     pool = EDGE_SPEAKER_VOICES.get(lang, EDGE_SPEAKER_VOICES["zh"])
@@ -587,6 +609,27 @@ def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str
                  os.path.join(out_dir, f"seg_{i:04d}.wav"), voice_of(s))
                 for i, s in enumerate(segments)]
         _tts_edge_batch(jobs)
+        for (_, dst, _), s in zip(jobs, segments):
+            s.tts_path = dst
+        return stats
+
+    if backend == "mimo":
+        if not (mimo_cfg and mimo_cfg.get("key")):
+            raise ValueError("backend=mimo 需要 MiMo key（--mimo-key / DUB_MIMO_KEY / config.json mimo 段）")
+        by_mimo = MIMO_VOICE_BY_PROFILE.get(lang, {})
+
+        def mimo_voice_of(s: Segment) -> str:
+            if voice:
+                return voice
+            if profiles and s.speaker in profiles:
+                p = profiles[s.speaker]
+                return by_mimo.get((p["gender"], p["age"]), "mimo_default")
+            return "mimo_default"
+
+        jobs = [(s.translated or s.text,
+                 os.path.join(out_dir, f"seg_{i:04d}.wav"), mimo_voice_of(s))
+                for i, s in enumerate(segments)]
+        _tts_mimo_batch(jobs, mimo_cfg)
         for (_, dst, _), s in zip(jobs, segments):
             s.tts_path = dst
         return stats
@@ -637,6 +680,27 @@ def _tts_edge_batch(jobs: list[tuple[str, str, str]]) -> None:
         await asyncio.gather(*(one(*j) for j in jobs))
 
     asyncio.run(run())
+
+
+def _tts_mimo_batch(jobs: list[tuple[str, str, str]], cfg: dict) -> None:
+    """并发合成 [(text, dst, voice)] 走小米 MiMo 云端。HTTP 接口偶发超时，逐段重试三次。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import mimo
+
+    def one(text: str, dst: str, voice: str) -> None:
+        for attempt in range(3):
+            try:
+                mimo.tts_one(cfg.get("base") or mimo.DEFAULT_BASE, cfg["key"], text, voice, dst)
+                return
+            except Exception as exc:
+                if attempt == 2:
+                    raise
+                print(f"    [tts] mimo 重试 {attempt + 1}/3：{type(exc).__name__}", flush=True)
+                time.sleep(1.5 * (attempt + 1))
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        list(ex.map(lambda j: one(*j), jobs))
 
 
 _COSY = {}

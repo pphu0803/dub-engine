@@ -31,22 +31,46 @@ JOBS: dict[str, dict] = {}
 JOBS_BY_KEY: dict[str, str] = {}
 _ACTIVE = threading.Lock()  # 同一时间只允许一个 job 占 GPU
 LLM_CFG = {"base": "", "key": "", "model": ""}
+MIMO_CFG = {"base": "", "key": ""}
+TTS_DEFAULT = "edge"
 
 
-def _load_llm_config(cli: dict) -> dict:
-    """LLM 配置三级优先：CLI 参数 > 环境变量 > config.json（不入库）。"""
+def _load_config(section: str, cli: dict, env_map: dict) -> dict:
+    """配置三级优先：CLI 参数 > 环境变量 > config.json 的 section（不入库）。"""
     workdir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cfg = {}
     p = os.path.join(workdir, "config.json")
     if os.path.exists(p):
         try:
-            cfg = json.load(open(p, encoding="utf-8")).get("llm", {}) or {}
+            cfg = json.load(open(p, encoding="utf-8")).get(section, {}) or {}
         except Exception:
             cfg = {}
     merged = {}
-    for k, env_k in (("base", "DUB_LLM_BASE"), ("key", "DUB_LLM_KEY"), ("model", "DUB_LLM_MODEL")):
+    for k, env_k in env_map.items():
         merged[k] = (cli.get(k) or os.environ.get(env_k, "") or str(cfg.get(k, ""))).strip()
     return merged
+
+
+def _load_llm_config(cli: dict) -> dict:
+    return _load_config("llm", cli,
+                        {"base": "DUB_LLM_BASE", "key": "DUB_LLM_KEY", "model": "DUB_LLM_MODEL"})
+
+
+def _load_mimo_config(cli: dict) -> dict:
+    cfg = _load_config("mimo", cli, {"base": "DUB_MIMO_BASE", "key": "DUB_MIMO_KEY"})
+    return {"base": cfg.get("base") or "", "key": cfg.get("key") or ""}
+
+
+def _load_tts_default(cli_val: str) -> str:
+    workdir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    val = ""
+    p = os.path.join(workdir, "config.json")
+    if os.path.exists(p):
+        try:
+            val = str(json.load(open(p, encoding="utf-8")).get("tts_backend", "") or "")
+        except Exception:
+            val = ""
+    return (cli_val or os.environ.get("DUB_TTS_BACKEND", "") or val or "edge").strip()
 
 
 def _looks_like_audio(head: bytes) -> bool:
@@ -143,7 +167,7 @@ def start_job(payload: dict, workdir: str) -> dict:
         src = _fetch_audio(url, payload.get("referer", ""), workdir)
 
     lang = payload.get("lang", "zh")
-    tts_backend = payload.get("tts_backend", "edge")
+    tts_backend = payload.get("tts_backend") or TTS_DEFAULT
     # 任务键与状态目录共用 PIPELINE_VER（streaming.py），升级对齐逻辑时 +1，
     # 让"重新配音"生成新任务吃到新逻辑
     key = (f"{os.path.splitext(os.path.basename(src))[0]}_{lang}_{tts_backend}"
@@ -181,6 +205,8 @@ def start_job(payload: dict, workdir: str) -> dict:
                     api_base=LLM_CFG["base"],
                     api_key=LLM_CFG["key"],
                     llm_model=LLM_CFG["model"],
+                    mimo_base=MIMO_CFG["base"],
+                    mimo_key=MIMO_CFG["key"],
                 )
             except Exception as exc:
                 job["status"] = "error"
@@ -286,13 +312,19 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def serve(port: int = 8765, llm_base: str = "", llm_key: str = "", llm_model: str = "") -> None:
-    global LLM_CFG
+def serve(port: int = 8765, llm_base: str = "", llm_key: str = "", llm_model: str = "",
+          mimo_base: str = "", mimo_key: str = "", tts_backend: str = "") -> None:
+    global LLM_CFG, MIMO_CFG, TTS_DEFAULT
     LLM_CFG = _load_llm_config({"base": llm_base, "key": llm_key, "model": llm_model})
     if LLM_CFG["base"] and LLM_CFG["key"]:
         print(f"[serve] LLM: {LLM_CFG['model'] or '(默认模型)'} @ {LLM_CFG['base']}")
     else:
         print("[serve] 未配置 LLM（config.json / 环境变量 / --llm-* 三选一），翻译将不可用")
+    MIMO_CFG = _load_mimo_config({"base": mimo_base, "key": mimo_key})
+    if MIMO_CFG["key"]:
+        print(f"[serve] MiMo TTS: {MIMO_CFG['base'] or '(默认端点)'}")
+    TTS_DEFAULT = _load_tts_default(tts_backend)
+    print(f"[serve] 默认 TTS: {TTS_DEFAULT}")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"[serve] http://127.0.0.1:{port}  (Ctrl+C 退出)")
     httpd.serve_forever()

@@ -3,5 +3,10 @@
     "base": "https://api.deepseek.com/v1",
     "key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     "model": "deepseek-chat"
-  }
+  },
+  "mimo": {
+    "base": "https://api.xiaomimimo.com/v1",
+    "key": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "tts_backend": "edge"
 }

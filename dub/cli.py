@@ -21,6 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--llm-base", default="", help="OpenAI 兼容接口地址（如 https://api.deepseek.com/v1）")
     s.add_argument("--llm-key", default="", help="LLM API key（也可用 config.json 或环境变量）")
     s.add_argument("--llm-model", default="", help="模型名（如 deepseek-chat）")
+    s.add_argument("--mimo-base", default="", help="小米 MiMo 端点（默认 https://api.xiaomimimo.com/v1）")
+    s.add_argument("--mimo-key", default="", help="MiMo key（也可用 config.json mimo 段或 DUB_MIMO_KEY）")
+    s.add_argument("--tts-backend", default="", choices=["", "edge", "mimo"],
+                   help="默认 TTS 后端（默认 edge；请求里 tts_backend 优先）")
 
     r = sub.add_parser("run", help="跑完整管线")
     r.add_argument("--input", required=True, help="本地媒体文件（mp4/mkv/m4s/wav 都行）")
@@ -52,7 +56,8 @@ def main(argv=None) -> int:
     if args.cmd == "serve":
         from .serve import serve
 
-        serve(args.port, args.llm_base, args.llm_key, args.llm_model)
+        serve(args.port, args.llm_base, args.llm_key, args.llm_model,
+              args.mimo_base, args.mimo_key, args.tts_backend)
         return 0
 
     opts = Options(

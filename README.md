@@ -141,6 +141,15 @@ export DUB_LLM_MODEL="deepseek-chat"
 
 见下一节的 `--llm-*` 参数。
 
+## TTS 后端
+
+| 后端 | 说明 | 配置 |
+|---|---|---|
+| `edge`（默认） | 微软 Edge 神经声线，覆盖中/英/日/韩 | 无需配置 |
+| `mimo` | 小米 MiMo 云端 TTS（24kHz WAV，中文听感更自然；声线：茉莉/苏打/白桦/Mia/Milo/Dean 等） | config.json `mimo` 段 / `DUB_MIMO_KEY` / `--mimo-key` |
+
+切换默认后端：config.json `"tts_backend": "mimo"`，或启动参数 `--tts-backend mimo`，或请求里带 `"tts_backend"`（优先级最高）。说话人按性别/年龄映射声线，映射表在 `dub/stages.py` 的 `MIMO_VOICE_BY_PROFILE`（性别是保守猜测，可自行校准）；ja/ko 走 MiMo 未验证，建议保留 edge。
+
 ## 启动本地服务
 
 ```bash
