@@ -19,9 +19,12 @@ from . import audio, diarize, stages
 from .profile import classify, f0_stats, spectral_centroid_hz
 
 CHUNK_SEC = 60.0
+# 配音覆盖区外的人声干声压低量（dB）：覆盖区内压低让位配音，
+# 覆盖区外原样播出——识别漏掉的句子不再变成静音洞
+VOC_KEEP_DB = -18.0
 # 对齐/混音逻辑升级时 +1（p3 → p4 …）：任务目录随之换新，
 # "重新配音"才会真正重跑而不是命中旧缓存；旧目录原样保留作退路
-PIPELINE_VER = "p3"
+PIPELINE_VER = "p4"
 # 目标语言 → 每秒字数（翻译预算）
 CPS = {"zh": 4.5, "en": 12.0, "ja": 7.0, "ko": 7.0}
 
@@ -85,6 +88,59 @@ class SpeakerRegistry:
             "profiles": {str(k): v for k, v in self.profiles.items()},
         }
 
+    def consolidate(self) -> dict[int, int]:
+        """画像归并：同 gender 且 F0 相对差 ≤25% 的说话人链式归并。
+        BGM 残留/情绪起伏会把同一人拆成多个 ID（实测 25min 片拆出 23 个），
+        表现为角色中途换声。质心按成员均值重组，后续 assign 直接落到归并后的类；
+        返回 旧id→新id 映射，供本段已分配的句子改写。"""
+        ids = sorted(set(self.profiles) | set(range(len(self.centroids))))
+        parent = {i: i for i in ids}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        prof_ids = [i for i in ids if i in self.profiles]
+        for a in range(len(prof_ids)):
+            for b in range(a + 1, len(prof_ids)):
+                pa, pb = self.profiles[prof_ids[a]], self.profiles[prof_ids[b]]
+                if pa.get("gender") == "x" or pa.get("gender") != pb.get("gender"):
+                    continue
+                fa, fb = pa.get("f0") or 0.0, pb.get("f0") or 0.0
+                if fa <= 0 or fb <= 0 or abs(fa - fb) > 0.25 * min(fa, fb):
+                    continue
+                ra, rb = find(prof_ids[a]), find(prof_ids[b])
+                if ra != rb:
+                    parent[max(ra, rb)] = min(ra, rb)
+
+        groups: dict[int, list[int]] = {}
+        for i in ids:
+            groups.setdefault(find(i), []).append(i)
+        ordered = sorted(groups.values(), key=lambda ms: min(ms))
+        mapping = {m: k for k, members in enumerate(ordered) for m in members}
+        if all(mapping[i] == i for i in ids):
+            return mapping
+
+        cents, profs = [], {}
+        for members in ordered:
+            cs = [self.centroids[m] for m in members if m < len(self.centroids)]
+            c = np.mean(cs, axis=0) if cs else np.zeros(192, dtype=np.float32)
+            n = float(np.linalg.norm(c))
+            cents.append((c / n if n > 0 else c).astype(np.float32))
+            ms = [self.profiles[m] for m in members if m in self.profiles]
+            if ms:
+                f0 = float(np.mean([p.get("f0") or 0.0 for p in ms]))
+                f0std = float(np.mean([p.get("f0std") or 0.0 for p in ms]))
+                cen = float(np.mean([p.get("centroid") or 0.0 for p in ms]))
+                g, age = classify(f0, f0std, cen) if f0 > 0 else ("x", "young")
+                profs[len(cents) - 1] = {"f0": round(f0, 1), "f0std": round(f0std, 1),
+                                         "centroid": round(cen), "gender": g, "age": age}
+        self.centroids = cents
+        self.profiles = profs
+        return mapping
+
 
 def _f0(wav: np.ndarray) -> tuple[float, float]:
     from .profile import f0_stats
@@ -120,9 +176,12 @@ def _to_mp3(wav: str, mp3: str) -> None:
 
 
 def _mix_chunk(bed_path: str, segs: list, out_wav: str, gain: float,
-               duck_db: float = -8.0, max_stretch: float = 1.35) -> None:
+               duck_db: float = -8.0, max_stretch: float = 1.35,
+               voc_path: str = "") -> None:
     """段内混音：每句起点对齐原句（口型起手），速率贴合到"下一句起点"
-    ——台词节奏跟表演走，不与下一句串位。全局统一增益防响度跳变。"""
+    ——台词节奏跟表演走，不与下一句串位。全局统一增益防响度跳变。
+    voc_path：人声干声。配音覆盖区外原样回放——VAD/ASR 漏掉的句子
+    （以及纯歌声）播出原声而不是留下静音洞。"""
     bed, sr = audio.load(bed_path, sr=stages.SR_MIX)
     if bed.shape[1] == 1:
         bed = np.repeat(bed, 2, axis=1)
@@ -149,6 +208,13 @@ def _mix_chunk(bed_path: str, segs: list, out_wav: str, gain: float,
     spans = [(int(s.start * sr), int(s.end * sr)) for s in segs]
     env = audio.db_envelope(len(bed), spans, sr, duck_db)
     mix = bed * env[:, None] + dub
+    if voc_path and os.path.exists(voc_path):
+        voc, _ = audio.load(voc_path, sr=sr)
+        if voc.shape[1] == 1:
+            voc = np.repeat(voc, 2, axis=1)
+        n = min(len(voc), len(bed))
+        env_voc = audio.db_envelope(n, spans, sr, VOC_KEEP_DB)
+        mix[:n] += voc[:n] * env_voc[:, None]
     mix *= gain
     audio.save(out_wav, np.clip(mix, -1.0, 1.0), sr)
 
@@ -247,13 +313,21 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
         for spk, wavs in by_spk_audio.items():
             reg.ensure_profile(spk, wavs)
 
+        # 碎片说话人归并（同 gender+F0 相近链式合并），本段句子同步改写
+        remap = reg.consolidate()
+        if any(k != v for k, v in remap.items()):
+            for s in segs:
+                s.speaker = remap.get(s.speaker, s.speaker)
+            print(f"    [spk] 画像归并: {len(remap)} 个 ID -> {len(set(remap.values()))} 类",
+                  flush=True)
+
         stages.translate(segs, backend="llm", target=lang, chars_per_sec=cps,
                          api_base=api_base, api_key=api_key, model=llm_model)
         stages.tts(segs, os.path.join(cdir, "tts"), backend=tts_backend,
                    lang=lang, profiles=reg.profiles,
                    mimo_cfg={"base": mimo_base, "key": mimo_key})
 
-        _mix_chunk(bed, segs, os.path.join(cdir, "chunk.wav"), gain)
+        _mix_chunk(bed, segs, os.path.join(cdir, "chunk.wav"), gain, voc_path=vocals)
         mp3 = os.path.join(cdir, "chunk.mp3")
         _to_mp3(os.path.join(cdir, "chunk.wav"), mp3)
         ch["status"] = "done"

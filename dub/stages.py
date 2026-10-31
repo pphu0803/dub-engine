@@ -40,6 +40,9 @@ class Segment:
     translated: str = ""
     tts_path: str = ""
     speaker: int = 0
+    # 段内可信边界（whisper 碎段合并前的起点）。合并会抹掉内部结构，
+    # 切长句时这些是唯一真实的对齐锚点，没有它们只能按字符占比猜
+    anchors: list[float] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -244,14 +247,30 @@ def _grams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
+def _snap_anchor(t: float, anchors: list[float], lo: float, hi: float,
+                 tol: float = 1.5) -> float | None:
+    """t 附近 tol 秒内的真实边界（要求 lo < 锚点 < hi）→ 吸附；没有则 None。"""
+    best, bd = None, tol
+    for a in anchors:
+        if not (lo < a < hi):
+            continue
+        d = abs(a - t)
+        if d < bd:
+            best, bd = a, d
+    return best
+
+
 def _split_long(segs: list[Segment], max_dur: float = 12.0) -> list[Segment]:
     """长段按句末标点切细（连续解说没有停顿，VAD/whisper 都切不动它）。
-    时间按字符占比分配——对齐节奏的最后一环。碎片过短则并入前段。"""
+    切点优先吸附到段内真实边界（anchors：whisper 碎段合并前的起点）——
+    字符占比只是插值估计，直接用会把句起点猜偏一两秒，口型就错节了。
+    碎片过短则并入前段。"""
     out: list[Segment] = []
     for s in segs:
         if s.duration <= max_dur:
             out.append(s)
             continue
+        anchors = [a for a in s.anchors if s.start + 0.3 < a < s.end - 0.3]
         pieces: list[str] = []
         buf = ""
         for ch in s.text:
@@ -273,10 +292,13 @@ def _split_long(segs: list[Segment], max_dur: float = 12.0) -> list[Segment]:
             continue
         total = sum(len(p) for p in merged)
         cur = s.start
-        for p in merged:
+        for j, p in enumerate(merged):
             d = s.duration * len(p) / total
-            out.append(Segment(round(cur, 3), round(cur + d, 3), p))
-            cur += d
+            t_end = cur + d
+            if j < len(merged) - 1:
+                t_end = _snap_anchor(t_end, anchors, s.start + 0.3, s.end - 0.3) or t_end
+            out.append(Segment(round(cur, 3), round(t_end, 3), p))
+            cur = t_end
     return out
 
 
@@ -402,6 +424,9 @@ def _asr_transformers(path: str, language: str | None, device: str,
     merged: list[Segment] = []
     for s in segs:
         if merged and s.start - merged[-1].end <= merge_gap:
+            # 合并时保住内部真实边界，供 _split_long 吸附
+            merged[-1].anchors.append(s.start)
+            merged[-1].anchors.extend(s.anchors)
             merged[-1].end = s.end
             merged[-1].text = merged[-1].text.rstrip("，。,. ") + " " + s.text.lstrip("，。,. ")
         else:
