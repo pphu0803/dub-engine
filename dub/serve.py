@@ -230,10 +230,14 @@ class Handler(BaseHTTPRequestHandler):
                 chunks = job.get("chunks") or []
                 k = int(parts[4])
                 ch = chunks[k] if k < len(chunks) else {}
-                if ch.get("status") != "done" or not ch.get("mp3"):
+                fp = ch.get("mp3", "")
+                if ch.get("status") != "done" or not fp or not os.path.exists(fp):
                     self._json({"error": "chunk not ready"}, 409)
                     return
-                self._file(ch["mp3"], "audio/mpeg")
+                try:
+                    self._file(fp, "audio/mpeg")
+                except OSError:
+                    self._json({"error": "chunk file missing"}, 410)
                 return
             self._json({
                 "id": job["id"], "status": job["status"], "stage": job.get("stage"),
