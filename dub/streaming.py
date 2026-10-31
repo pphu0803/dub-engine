@@ -4,7 +4,7 @@
 - 说话人：全局注册表——每句算 CAM++ 嵌入，与已有质心 cos≥0.55 归并，
   新人现场建档（F0 画像）。跨段说话人编号稳定，这是分段的正确性关键。
 - 段内混音用全轨统一增益（避免逐段峰值归一造成的段间响度跳变）
-- 任务目录 = 内容哈希+语言+后端，state.json 落盘：中断续跑、完成秒回
+- 任务目录 = 内容哈希+语言+后端+流水线版本，state.json 落盘：中断续跑、完成秒回
 """
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ from . import audio, diarize, stages
 from .profile import classify, f0_stats, spectral_centroid_hz
 
 CHUNK_SEC = 60.0
+# 对齐/混音逻辑升级时 +1（p3 → p4 …）：任务目录随之换新，
+# "重新配音"才会真正重跑而不是命中旧缓存；旧目录原样保留作退路
+PIPELINE_VER = "p3"
 # 目标语言 → 每秒字数（翻译预算）
 CPS = {"zh": 4.5, "en": 12.0, "ja": 7.0, "ko": 7.0}
 
@@ -155,7 +158,8 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
     """线程主体。job dict 由 serve 持有，状态同时落盘以便续跑/秒回。"""
     t0 = time.perf_counter()
     base = os.path.splitext(os.path.basename(src))[0]
-    job_dir = os.path.join(workdir, "work", "stream", f"{base}_{lang}_{tts_backend}")
+    job_dir = os.path.join(workdir, "work", "stream",
+                           f"{base}_{lang}_{tts_backend}_{PIPELINE_VER}")
     os.makedirs(job_dir, exist_ok=True)
     job["dir"] = job_dir
     state_path = os.path.join(job_dir, "state.json")
