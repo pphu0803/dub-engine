@@ -1,9 +1,11 @@
 /**
- * content.js — 视频页注入按钮/状态 pill/同步播放器，并驱动整个流程
+ * content.js — 纯 content script 架构（v0.2，无 background/SW）
  *
- * 架构：content 是司机（页面常驻，轮询引擎状态），SW 只做无状态代理。
- * 音轨候选来自 performance 资源历史（页面记全账）+ video src。
- * 就绪后：原声静音，Audio 元素播配音母版，按 video.currentTime 同步。
+ * 为什么没有 SW：MV3 service worker 闲置 30s 被杀，消息链/长驻轮询全部
+ * 不可靠（v0.1 三次真机翻车的根因）。本页面自己就是司机：
+ *   音轨候选 = performance 资源历史（含 transferSize）+ video src + YT 特例
+ *   请求     = 直接 fetch http://127.0.0.1:8765（CORS+PNA 由引擎响应头解决）
+ *   播放     = blob URL + Audio 元素随 <video> 同步
  */
 (() => {
   if (window.__dubInstalled) return;
@@ -12,11 +14,16 @@
   // 页面资源历史默认只留 ~250 条，长页面会挤掉音轨请求，扩容
   try { performance.setResourceTimingBufferSize(4000); } catch (_) {}
 
+  const SERVER = "http://127.0.0.1:8765";
   const MEDIA_RE = /\.(m4s|mp4|m4a|aac|webm|mp3|ogg|wav|flac)(\?|#|$)/i;
+  const PLAYLIST_RE = /\.(m3u8|mpd)(\?|#|$)/i;
+  const AUDIO_HINT = /(audio|aud|aac|m4a|mp3|wav|ogg|flac|dash_audio|_140|_251|30280|30216|30232)/i;
   const STAGE_ZH = {
     extract: "抽音轨", separate: "Demucs 分离", asr: "Whisper 识别",
     translate: "LLM 翻译", tts: "配音合成", assemble: "混音", encode: "转码",
   };
+
+  // ------------------------------------------------------------------ UI
 
   const pill = document.createElement("div");
   Object.assign(pill.style, {
@@ -45,44 +52,96 @@
   btn.onclick = () => begin().catch((e) => fail("启动失败：" + e.message));
   document.documentElement.appendChild(btn);
 
+  function fail(msg) {
+    if (timer) clearInterval(timer);
+    show("❌ " + msg, 15000);
+    btn.style.display = "block";
+  }
+
+  // ------------------------------------------------------------- 音轨挑选
+
   function sniff() {
-    const urls = new Set();
+    const out = [];
     for (const e of performance.getEntriesByType("resource")) {
-      if (/^https?:/.test(e.name) && MEDIA_RE.test(e.name)) urls.add(e.name);
+      const u = e.name;
+      if (!/^https?:/.test(u) || PLAYLIST_RE.test(u) || !MEDIA_RE.test(u)) continue;
+      out.push({ url: u, size: e.transferSize || 0, forced: false });
     }
     document.querySelectorAll("video,audio,source").forEach((el) => {
-      if (el.src) urls.add(el.src);
-      if (el.currentSrc) urls.add(el.currentSrc);
+      for (const u of [el.src, el.currentSrc]) {
+        if (u && /^https?:/.test(u) && MEDIA_RE.test(u) && !PLAYLIST_RE.test(u)) {
+          out.push({ url: u, size: 0, forced: false });
+        }
+      }
     });
     try {
       const pr = window.ytInitialPlayerResponse;
       (pr?.streamingData?.adaptiveFormats || [])
         .filter((f) => (f.mimeType || "").startsWith("audio/") && f.url)
-        .forEach((f) => urls.add(f.url));
+        .forEach((f) => out.push({ url: f.url, size: Number(f.contentLength) || 0, forced: true }));
     } catch (_) { /* 非 YouTube */ }
-    return [...urls];
+    return out;
   }
+
+  function pick() {
+    const ok = sniff()
+      .map((c) => {
+        let s = 0;
+        if (c.forced) s += 10;
+        if (AUDIO_HINT.test(c.url)) s += 2;
+        if (/\.(m4a|aac|mp3|flac|ogg|wav)(\?|#|$)/i.test(c.url)) s += 1;
+        if (/\.m4s(\?|#|$)/i.test(c.url)) s += 1;
+        if (c.size > 300 * 1024) s += 2;
+        return { ...c, s };
+      })
+      // 资格线：必须有音频特征（video m4s 只有 m4s+体积，混不进来）
+      .filter((c) => c.s >= 3 && (c.forced || AUDIO_HINT.test(c.url)))
+      .sort((a, b) => b.s - a.s);
+    return ok[0] || null;
+  }
+
+  // ---------------------------------------------------------------- 流程
 
   let timer = null;
   let jobId = null;
 
+  async function xfetch(url, opts = {}, timeoutMs = 15000) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...opts, signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
   async function begin() {
     btn.style.display = "none";
     show("读页面记录…");
-    let res;
+    const c = pick();
+    if (!c) {
+      fail("没找到像音轨的请求——重新打开视频页、播放 2 秒再试（按 F12 → Network 应能看到 .m4s）");
+      return;
+    }
+    console.log("[dub] 音轨:", c.url, "score", c.s);
+    show("⏳ 排队…");
+    let job;
     try {
-      res = await chrome.runtime.sendMessage({
-        type: "dub-begin", urls: sniff(), pageUrl: location.href, lang: "zh",
+      const r = await xfetch(SERVER + "/api/dub", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: c.url, referer: location.href, lang: "zh" }),
       });
+      job = await r.json();
     } catch (e) {
-      fail("后台未响应（扩展刚刷新过？）：" + e.message);
+      fail("连不上本地引擎（python -m dub serve）：" + e.message);
       return;
     }
-    if (!res || res.error) {
-      fail((res && res.error) || "未知错误");
+    if (!job.job_id) {
+      fail(job.error || "提交失败");
       return;
     }
-    jobId = res.jobId;
+    jobId = job.job_id;
     show("⏳ 排队…");
     timer = setInterval(poll, 3000);
     poll();
@@ -91,23 +150,20 @@
   async function poll() {
     let st;
     try {
-      st = await chrome.runtime.sendMessage({ type: "job-status", jobId });
+      const r = await xfetch(`${SERVER}/api/job/${jobId}`);
+      st = await r.json();
     } catch (_) {
-      return; // SW 短暂不可用，下轮再试
+      return; // 引擎忙/瞬时失联，下轮再试
     }
-    if (!st) return;
-    if (st.error) { fail(st.error); return; }
     if (st.status === "error") { fail(st.error || "引擎出错"); return; }
     if (st.status === "done") {
       clearInterval(timer);
       show("⏳ 取回音频…");
       try {
-        const au = await chrome.runtime.sendMessage({ type: "job-audio", jobId });
-        if (!au || au.error) throw new Error((au && au.error) || "空响应");
-        const bin = atob(au.b64);
-        const arr = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-        attach(URL.createObjectURL(new Blob([arr], { type: "audio/mpeg" })));
+        const r = await xfetch(`${SERVER}/api/job/${jobId}/audio`, {}, 60000);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const blob = await r.blob();
+        attach(URL.createObjectURL(blob));
       } catch (e) {
         fail("取音频失败：" + e.message);
       }
@@ -116,13 +172,7 @@
     show(`⏳ ${STAGE_ZH[st.stage] || st.stage || "处理中"}`);
   }
 
-  function fail(msg) {
-    if (timer) clearInterval(timer);
-    show("❌ " + msg, 12000);
-    btn.style.display = "block";
-  }
-
-  // ------------------------------------------------------------------ //
+  // ---------------------------------------------------------------- 播放
 
   function attach(url) {
     const vids = [...document.querySelectorAll("video")].filter((v) => v.duration > 0 || v.src || v.currentSrc);
