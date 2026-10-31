@@ -90,16 +90,32 @@ def _download(url: str, referer: str, dst: str) -> int:
     s.headers.update({"User-Agent": UA, "Accept": "*/*"})
     if referer:
         s.headers["Referer"] = referer
-    r = s.get(url, stream=True, timeout=(15, 60))
-    r.raise_for_status()
     n = 0
     head = b""
-    with open(dst, "wb") as f:
-        for chunk in r.iter_content(1 << 20):
-            if len(head) < 16:
-                head += chunk
-            f.write(chunk)
-            n += len(chunk)
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        # B 站 CDN 偶发 TLS 重置（SSL UNEXPECTED_EOF）/连接抖动，整段下载三连重试
+        try:
+            r = s.get(url, stream=True, timeout=(15, 60))
+            r.raise_for_status()
+            n = 0
+            head = b""
+            with open(dst, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    if len(head) < 16:
+                        head += chunk
+                    f.write(chunk)
+                    n += len(chunk)
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt == 2:
+                raise
+            print(f"[serve] 下载重试 {attempt + 1}/3：{type(exc).__name__}", flush=True)
+            import time as _t
+
+            _t.sleep(2 * (attempt + 1))
+    assert last_exc is None
     # 插件偶发抓到 HTML/空响应（播放器杂项请求），在这里拦下给清楚报错
     if n < 64 * 1024 or not _looks_like_audio(head[:16]):
         ctype = r.headers.get("content-type", "?")
