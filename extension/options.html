@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>dub 引擎管理页</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.6 system-ui, sans-serif; background: #101016; color: #e8e8ee; }
+  main { max-width: 780px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #9a9aa6; font-size: 12.5px; margin-bottom: 22px; }
+  .card { background: #18181f; border: 1px solid #26262f; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 14.5px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; flex: none; }
+  .card h2 .dot.up { background: #42e695; }
+  .card h2 .dot.down { background: #ff5f56; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 24px; }
+  .kv { display: flex; gap: 8px; font-size: 13px; }
+  .kv b { color: #9a9aa6; font-weight: 500; flex: none; }
+  field { display: block; margin: 10px 0; }
+  field label { display: block; font-size: 12px; color: #9a9aa6; margin-bottom: 3px; }
+  input, select { width: 100%; background: #22222b; color: #e8e8ee; border: 1px solid #33333f; border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+  input:focus, select:focus { outline: none; border-color: #3bb2b8; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .acts { display: flex; gap: 8px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
+  button { padding: 7px 16px; border-radius: 8px; border: 1px solid #33333f; background: #22222b; color: #e8e8ee; font-size: 13px; cursor: pointer; }
+  button:hover { border-color: #4a4a58; }
+  button.primary { background: linear-gradient(135deg,#42e695,#3bb2b8); border: 0; color: #04140c; font-weight: 600; }
+  button.danger:hover { border-color: #a04a4a; color: #ff8f88; }
+  button:disabled { opacity: .5; cursor: default; }
+  .msg { font-size: 12.5px; }
+  .msg.ok { color: #42e695; }
+  .msg.err { color: #ff8f88; }
+  .hint { color: #77777f; font-size: 11.5px; margin-top: 4px; }
+  .switch { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; }
+  .switch input { width: 36px; height: 20px; appearance: none; border-radius: 999px; background: #33333f; position: relative; cursor: pointer; margin: 0; flex: none; transition: background .2s; }
+  .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #9a9aa6; transition: all .2s; }
+  .switch input:checked { background: #2c7a52; }
+  .switch input:checked::after { left: 18px; background: #42e695; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: #9a9aa6; font-weight: 500; padding: 6px 8px; border-bottom: 1px solid #26262f; }
+  td { padding: 7px 8px; border-bottom: 1px solid #1e1e26; vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #22222b; border: 1px solid #33333f; color: #b8b8c4; }
+  .badge.run { border-color: #2a5c7a; color: #8ec5fc; }
+  .badge.done { border-color: #2c7a52; color: #42e695; }
+  .badge.warn { border-color: #7a5c20; color: #e8c268; }
+  .badge.err { border-color: #7a2a2a; color: #ff8f88; }
+  td a { color: #8ec5fc; text-decoration: none; }
+  td a:hover { text-decoration: underline; }
+  .empty { color: #77777f; text-align: center; padding: 18px 0; }
+  code { background: #22222b; padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+  .errbox { background: #241a1c; border: 1px solid #4a2a2a; border-radius: 8px; padding: 10px 14px; font-size: 12.5px; color: #e8b8b4; margin-bottom: 16px; display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>dub 引擎管理页</h1>
+  <div class="sub">本地引擎 <code>http://127.0.0.1:8765</code> · 配置改动写回 config.json 并热生效，无需重启</div>
+  <div class="errbox" id="offline">❌ 引擎离线。先启动：<code>python -m dub serve --port 8765</code></div>
+
+  <div class="card">
+    <h2><span class="dot" id="dot"></span>引擎状态 <span class="msg" id="healthMsg" style="margin-left:auto;font-weight:400"></span></h2>
+    <div class="grid">
+      <div class="kv"><b>版本</b><span id="hVer">—</span></div>
+      <div class="kv"><b>流水线</b><span id="hPipe">—</span></div>
+      <div class="kv"><b>默认 TTS</b><span id="hTts">—</span></div>
+      <div class="kv"><b>已运行</b><span id="hUp">—</span></div>
+      <div class="kv"><b>翻译 LLM</b><span id="hLlm">—</span></div>
+      <div class="kv"><b>MiMo TTS</b><span id="hMimo">—</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>翻译 LLM</h2>
+    <div class="three">
+      <field><label>接口地址 base（OpenAI 兼容）</label><input id="llmBase" placeholder="https://api.deepseek.com/v1" autocomplete="off"></field>
+      <field><label>模型名</label><input id="llmModel" placeholder="deepseek-chat" autocomplete="off"></field>
+      <field><label>API key</label><input id="llmKey" type="password" placeholder="" autocomplete="off"></field>
+    </div>
+    <div class="acts">
+      <button id="llmTest">测试连通</button>
+      <button id="llmSave" class="primary">保存</button>
+      <span class="msg" id="llmMsg"></span>
+    </div>
+    <div class="hint">key 留空 = 保持现值不变；清除请用「清除 key」。测试用的是表单里的值（key 留空则测已保存的）。</div>
+  </div>
+
+  <div class="card">
+    <h2>配音 TTS</h2>
+    <field><label>默认后端（新任务生效）</label>
+      <select id="ttsBackend"><option value="edge">edge（微软在线，免 key）</option><option value="mimo">mimo（小米云端）</option></select>
+    </field>
+    <div class="two">
+      <field><label>MiMo 端点 base</label><input id="mimoBase" placeholder="https://api.xiaomimimo.com/v1" autocomplete="off"></field>
+      <field><label>MiMo key</label><input id="mimoKey" type="password" placeholder="" autocomplete="off"></field>
+    </div>
+    <div class="acts">
+      <button id="ttsSave" class="primary">保存</button>
+      <button id="mimoTest">测试 MiMo</button>
+      <button id="mimoClear">清除 MiMo key</button>
+      <span class="msg" id="ttsMsg"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>插件偏好</h2>
+    <div class="two">
+      <field><label>默认目标语言</label>
+        <select id="lang">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+        </select>
+      </field>
+      <div>
+        <div class="switch"><span>页面状态灯</span><input type="checkbox" id="hud"></div>
+        <div class="hint">视频页右上角的引擎进度提示；关闭后不再显示（错误仍会提示）</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>任务列表 <span style="font-weight:400;color:#9a9aa6;font-size:12px;margin-left:auto">内存任务 + 磁盘历史（最近 30）</span></h2>
+    <table id="jobsTable"><thead>
+      <tr><th>任务</th><th>状态</th><th>进度</th><th>时长/耗时</th><th>时间</th><th style="width:96px">操作</th></tr>
+    </thead><tbody id="jobsBody"></tbody></table>
+    <div class="empty" id="jobsEmpty" style="display:none">还没有任务</div>
+  </div>
+</main>
+<script src="options.js"></script>
+</body>
+</html>

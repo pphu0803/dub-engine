@@ -4,6 +4,17 @@
   GET  /api/job/<id>            {status, stage, chunks[], duration, error}
   GET  /api/job/<id>/audio/<k>  第 k 段 mp3（该段 done 即可取）
   GET  /api/job/<id>/audio      整轨 mp3（全部完成后）
+  GET  /api/health              引擎状态（插件面板）
+  GET  /api/config              读配置（key 打码）
+  POST /api/config             写 config.json + 内存热生效（不用重启）
+  POST /api/config/test        配置测活 {"target": "llm"|"mimo", ...覆盖值}
+  GET  /api/jobs                任务列表（内存 + 磁盘历史）
+  DELETE /api/job/<id>         删除任务目录
+
+config/jobs/delete 类端点校验 Origin：只放行 chrome-extension:// 与无
+Origin（curl），网页 Origin 一律 403——任意网页不该能改配置、列任务。
+serve 重启后内存任务表清空，/api/job/<目录名> 会按 state.json 重建只读
+视图（轮询/取音频/删除照常可用）。
 
 流水线为分块流式（dub/streaming.py）：段 0 最先出声，后台顺序推进；
 任务目录按 内容哈希+语言+后端 命名，重复请求同一内容直接秒回。
@@ -15,7 +26,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -33,6 +46,14 @@ _ACTIVE = threading.Lock()  # 同一时间只允许一个 job 占 GPU
 LLM_CFG = {"base": "", "key": "", "model": ""}
 MIMO_CFG = {"base": "", "key": ""}
 TTS_DEFAULT = "edge"
+
+WORKDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STREAM_DIR = os.path.join(WORKDIR, "work", "stream")
+CFG_PATH = os.path.join(WORKDIR, "config.json")
+_START_TS = time.time()
+_CFG_LOCK = threading.Lock()  # config.json 读写互斥
+# 磁盘历史任务 id = 任务目录名（内容哈希_语言_后端_流水线版）；顺带挡路径注入
+_JOBID_RE = re.compile(r"^[0-9a-f]{16}_[a-z]{2}_[a-z0-9]+_p[0-9a-z]+$")
 
 
 def _load_config(section: str, cli: dict, env_map: dict) -> dict:
@@ -71,6 +92,213 @@ def _load_tts_default(cli_val: str) -> str:
         except Exception:
             val = ""
     return (cli_val or os.environ.get("DUB_TTS_BACKEND", "") or val or "edge").strip()
+
+
+# ---------------------------------------------------------------- 配置读写/测活
+
+def _masked(sec: dict) -> dict:
+    key = str(sec.get("key", "") or "")
+    return {"base": sec.get("base", ""), "model": sec.get("model", ""),
+            "key_set": bool(key), "key_tail": key[-4:] if key else ""}
+
+
+def _config_view() -> dict:
+    return {"tts_backend": TTS_DEFAULT, "pipeline_ver": streaming.PIPELINE_VER,
+            "llm": _masked(LLM_CFG), "mimo": _masked(MIMO_CFG)}
+
+
+def _update_config(body: dict) -> None:
+    """写 config.json + 热更新内存配置。字段语义：缺失或 "" = 保留现值，
+    null = 清除（管理页的 key 输入框留空即"不修改"，防止误清）。"""
+    with _CFG_LOCK:
+        try:
+            cfg = json.load(open(CFG_PATH, encoding="utf-8"))
+        except Exception:
+            cfg = {}
+
+        def merge(sec_name: str, fields: dict, updates: dict) -> None:
+            sec = cfg.setdefault(sec_name, {})
+            for k in fields:
+                if k not in updates:
+                    continue
+                v = updates[k]
+                if v is None:
+                    sec[k] = ""
+                elif isinstance(v, str) and v.strip():
+                    sec[k] = v.strip()
+
+        merge("llm", ("base", "key", "model"), body.get("llm") or {})
+        merge("mimo", ("base", "key"), body.get("mimo") or {})
+        if body.get("tts_backend") in ("edge", "mimo"):
+            cfg["tts_backend"] = body["tts_backend"]
+        json.dump(cfg, open(CFG_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    # 写盘成功后再热生效（_load_* 的优先级与启动时一致：环境变量 > config.json）
+    global LLM_CFG, MIMO_CFG, TTS_DEFAULT
+    LLM_CFG = _load_llm_config({})
+    MIMO_CFG = _load_mimo_config({})
+    TTS_DEFAULT = _load_tts_default("")
+
+
+def _test_llm(base: str, key: str, model: str) -> dict:
+    import requests
+
+    if not (base and key and model):
+        return {"ok": False, "error": "缺少 base / key / model"}
+    sess = requests.Session()
+    sess.trust_env = False  # 与翻译管线同款直连
+    t0 = time.perf_counter()
+    try:
+        r = sess.post(base.rstrip("/") + "/chat/completions",
+                      headers={"Authorization": f"Bearer {key}"},
+                      json={"model": model, "temperature": 0, "max_tokens": 1,
+                            "messages": [{"role": "user", "content": "hi"}]},
+                      timeout=(10, 30))
+        r.raise_for_status()
+        r.json()
+        return {"ok": True, "latency_ms": round((time.perf_counter() - t0) * 1000)}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+
+
+def _test_mimo(base: str, key: str) -> dict:
+    import tempfile
+
+    from . import mimo
+
+    if not key:
+        return {"ok": False, "error": "缺少 key"}
+    fd, dst = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    t0 = time.perf_counter()
+    try:
+        mimo.tts_one(base or mimo.DEFAULT_BASE, key, "你好，这是配音引擎测试。",
+                     "mimo_default", dst, timeout=45)
+        return {"ok": True, "latency_ms": round((time.perf_counter() - t0) * 1000)}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+    finally:
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------- 任务列表/重建/删除
+
+def _job_status_of(chunks: list, d: str) -> tuple[str, str]:
+    """state.json 只存段状态，任务级状态按磁盘现场推断（final.mp3 是最硬的证据）。"""
+    if os.path.exists(os.path.join(d, "final.mp3")):
+        return "done", ""
+    bad = sum(1 for c in chunks if c.get("status") == "error")
+    if bad:
+        return "partial", f"{bad} 段失败，重新配音可续跑"
+    if any(c.get("status") == "done" for c in chunks):
+        return "partial", "任务曾中断，重新配音可续跑"
+    return "error", "任务曾中断（serve 重启），重新配音续跑"
+
+
+def _disk_job_row(name: str) -> dict | None:
+    if not _JOBID_RE.match(name):
+        return None
+    d = os.path.join(STREAM_DIR, name)
+    sp = os.path.join(d, "state.json")
+    if not os.path.exists(sp):
+        return None
+    try:
+        state = json.load(open(sp, encoding="utf-8"))
+    except Exception:
+        return None
+    chunks = state.get("chunks") or []
+    status, note = _job_status_of(chunks, d)
+    parts = name.split("_")
+    return {
+        "id": name, "active": False, "status": status,
+        "lang": parts[1] if len(parts) >= 4 else "",
+        "tts_backend": parts[2] if len(parts) >= 4 else "",
+        "chunks_done": sum(1 for c in chunks if c.get("status") == "done"),
+        "chunks_total": len(chunks),
+        "duration": round(chunks[-1]["end"], 1) if chunks else 0,
+        "segments_total": sum(len(c.get("segments") or []) for c in chunks),
+        "error": note, "final": status == "done",
+        "mtime": int(os.path.getmtime(sp)),
+    }
+
+
+def _jobs_view() -> list[dict]:
+    rows = []
+    seen: set[str] = set()
+    for job in JOBS.values():
+        d = job.get("dir") or ""
+        name = os.path.basename(d) if d else ""
+        if name:
+            seen.add(name)
+        sp = os.path.join(d, "state.json") if d else ""
+        rows.append({
+            "id": job["id"], "active": True, "status": job["status"],
+            "stage": job.get("stage"), "lang": job.get("lang", ""),
+            "tts_backend": job.get("tts_backend", ""),
+            "chunks_done": job.get("chunks_done", 0),
+            "chunks_total": len(job.get("chunks") or []),
+            "duration": job.get("duration"), "total_s": job.get("total_s"),
+            "error": job.get("error"), "final": job["status"] == "done",
+            "mtime": int(os.path.getmtime(sp)) if sp and os.path.exists(sp) else int(time.time()),
+        })
+    try:
+        names = os.listdir(STREAM_DIR)
+    except OSError:
+        names = []
+    disk = [r for r in (_disk_job_row(n) for n in names) if r and r["id"] not in seen]
+    disk.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows + disk[:30]
+
+
+def _rehydrate(jid: str) -> dict | None:
+    """serve 重启后内存任务表清空：按目录名从 state.json 重建只读视图，
+    轮询/取段音频/删除照常可用。真正续跑走 POST /api/dub（确定性目录名命中）。"""
+    if not _JOBID_RE.match(jid):
+        return None
+    d = os.path.join(STREAM_DIR, jid)
+    sp = os.path.join(d, "state.json")
+    if not os.path.exists(sp):
+        return None
+    try:
+        state = json.load(open(sp, encoding="utf-8"))
+    except Exception:
+        return None
+    chunks = state.get("chunks") or []
+    if not chunks:
+        return None
+    status, note = _job_status_of(chunks, d)
+    parts = jid.split("_")
+    return {
+        "id": jid, "dir": d, "status": status, "stage": status,
+        "error": note or None, "duration": chunks[-1]["end"],
+        "lang": parts[1] if len(parts) >= 4 else "",
+        "tts_backend": parts[2] if len(parts) >= 4 else "",
+        "chunks": chunks,
+        "chunks_done": sum(1 for c in chunks if c.get("status") == "done"),
+    }
+
+
+def _delete_job(jid: str) -> tuple[dict, int]:
+    job = JOBS.get(jid)
+    d = ""
+    if job:
+        if job["status"] == "running":
+            return {"error": "任务进行中，等完成或失败后再删"}, 409
+        d = job.get("dir") or ""
+        JOBS.pop(jid, None)
+        if JOBS_BY_KEY.get(job.get("key")) == jid:
+            JOBS_BY_KEY.pop(job.get("key"), None)
+    else:
+        if not _JOBID_RE.match(jid):
+            return {"error": "no such job"}, 404
+        d = os.path.join(STREAM_DIR, jid)
+        if not os.path.isdir(d):
+            return {"error": "no such job"}, 404
+    if d and os.path.isdir(d):
+        shutil.rmtree(d, ignore_errors=True)
+    return {"ok": True, "removed": os.path.basename(d)}, 200
 
 
 def _looks_like_audio(head: bytes) -> bool:
@@ -234,13 +462,20 @@ def start_job(payload: dict, workdir: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "dub-serve/0.2"
+    server_version = "dub-serve/0.3"
 
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def _origin_ok(self) -> bool:
+        """配置/任务管理端点的来源闸门：content script 的 fetch 带网页 Origin
+        （它们只用 /api/dub 与 /api/job），管理操作只应来自扩展页面——带网页
+        Origin 的一律拒绝；无 Origin（curl）放行方便调试。"""
+        o = self.headers.get("Origin", "")
+        return not o or o.startswith("chrome-extension://")
 
     def _json(self, obj: dict, code: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -267,6 +502,41 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        if self.path == "/api/config":
+            if not self._origin_ok():
+                self._json({"error": "forbidden"}, 403)
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+                _update_config(body)
+            except Exception as exc:
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+                return
+            self._json(_config_view())
+            return
+        if self.path == "/api/config/test":
+            if not self._origin_ok():
+                self._json({"error": "forbidden"}, 403)
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception as exc:
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+                return
+            if body.get("target") == "llm":
+                o = body.get("llm") or {}
+                self._json(_test_llm(o.get("base") or LLM_CFG["base"],
+                                     o.get("key") or LLM_CFG["key"],
+                                     o.get("model") or LLM_CFG["model"]))
+            elif body.get("target") == "mimo":
+                o = body.get("mimo") or {}
+                self._json(_test_mimo(o.get("base") or MIMO_CFG["base"],
+                                      o.get("key") or MIMO_CFG["key"]))
+            else:
+                self._json({"error": "target 须为 llm 或 mimo"}, 400)
+            return
         if self.path != "/api/dub":
             self._json({"error": "not found"}, 404)
             return
@@ -280,15 +550,47 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(job)
 
+    def do_DELETE(self) -> None:
+        if not self._origin_ok():
+            self._json({"error": "forbidden"}, 403)
+            return
+        parts = self.path.strip("/").split("/")
+        if len(parts) == 3 and parts[:2] == ["api", "job"]:
+            body, code = _delete_job(parts[2])
+            self._json(body, code)
+            return
+        self._json({"error": "not found"}, 404)
+
     def do_GET(self) -> None:
         path, _, qs = self.path.partition("?")
         parts = path.strip("/").split("/")
         if path == "/api/health":
-            self._json({"ok": True})
+            running = sum(1 for j in JOBS.values() if j["status"] == "running")
+            self._json({
+                "ok": True, "version": "0.3", "pipeline_ver": streaming.PIPELINE_VER,
+                "tts_backend": TTS_DEFAULT,
+                "llm_set": bool(LLM_CFG["base"] and LLM_CFG["key"]),
+                "llm_model": LLM_CFG["model"],
+                "mimo_set": bool(MIMO_CFG["key"]),
+                "jobs": {"running": running, "total": len(JOBS)},
+                "uptime_s": int(time.time() - _START_TS),
+            })
+            return
+        if path == "/api/config":
+            if not self._origin_ok():
+                self._json({"error": "forbidden"}, 403)
+                return
+            self._json(_config_view())
+            return
+        if path == "/api/jobs":
+            if not self._origin_ok():
+                self._json({"error": "forbidden"}, 403)
+                return
+            self._json({"jobs": _jobs_view()})
             return
         # /api/job/<id> | /api/job/<id>/audio | /api/job/<id>/audio/<k>
         if len(parts) >= 3 and parts[:2] == ["api", "job"]:
-            job = JOBS.get(parts[2])
+            job = JOBS.get(parts[2]) or _rehydrate(parts[2])
             if not job:
                 self._json({"error": "no such job"}, 404)
                 return
@@ -322,6 +624,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({
                 "id": job["id"], "status": job["status"], "stage": job.get("stage"),
                 "error": job.get("error"), "duration": job.get("duration"),
+                "lang": job.get("lang", ""), "tts_backend": job.get("tts_backend", ""),
                 "chunks": [
                     {"i": c["i"], "start": round(c["start"], 2), "end": round(c["end"], 2),
                      "status": c["status"]}
@@ -338,17 +641,18 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(port: int = 8765, llm_base: str = "", llm_key: str = "", llm_model: str = "",
           mimo_base: str = "", mimo_key: str = "", tts_backend: str = "") -> None:
-    global LLM_CFG, MIMO_CFG, TTS_DEFAULT
+    global LLM_CFG, MIMO_CFG, TTS_DEFAULT, _START_TS
+    _START_TS = time.time()
     LLM_CFG = _load_llm_config({"base": llm_base, "key": llm_key, "model": llm_model})
     if LLM_CFG["base"] and LLM_CFG["key"]:
         print(f"[serve] LLM: {LLM_CFG['model'] or '(默认模型)'} @ {LLM_CFG['base']}")
     else:
-        print("[serve] 未配置 LLM（config.json / 环境变量 / --llm-* 三选一），翻译将不可用")
+        print("[serve] 未配置 LLM（config.json / 环境变量 / --llm-* 三选一，或到插件管理页填），翻译将不可用")
     MIMO_CFG = _load_mimo_config({"base": mimo_base, "key": mimo_key})
     if MIMO_CFG["key"]:
         print(f"[serve] MiMo TTS: {MIMO_CFG['base'] or '(默认端点)'}")
     TTS_DEFAULT = _load_tts_default(tts_backend)
     print(f"[serve] 默认 TTS: {TTS_DEFAULT}")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"[serve] http://127.0.0.1:{port}  (Ctrl+C 退出)")
+    print(f"[serve] http://127.0.0.1:{port}  (Ctrl+C 退出；配置可在插件管理页改，热生效)")
     httpd.serve_forever()

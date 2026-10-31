@@ -32,11 +32,31 @@
   });
   document.documentElement.appendChild(pill);
 
-  function show(html, ms) {
+  function show(html, ms, always) {
+    // 页面状态灯（插件面板/管理页可关）：关闭后进度提示只进 console，错误仍会弹出
+    if (!hudOn && !always) {
+      console.log("[dub]", html.replace(/<[^>]*>/g, " "));
+      return;
+    }
     pill.innerHTML = html;
     pill.style.display = "block";
     if (ms) setTimeout(() => (pill.style.display = "none"), ms);
   }
+
+  // 插件偏好：chrome.storage 为准（面板/管理页可改，跨站点统一），localStorage 兜底
+  let hudOn = true;
+  let lang = localStorage.getItem("dub_lang") || "zh";
+  try {
+    chrome.storage.local.get({ dub_lang: null, dub_hud: true }, (r) => {
+      if (r.dub_lang) { lang = r.dub_lang; langSel.value = lang; }
+      hudOn = r.dub_hud !== false;
+    });
+    chrome.storage.onChanged.addListener((ch, area) => {
+      if (area !== "local") return;
+      if ("dub_hud" in ch) hudOn = ch.dub_hud.newValue !== false;
+      if ("dub_lang" in ch) { lang = ch.dub_lang.newValue; langSel.value = lang; }
+    });
+  } catch (_) { /* 无扩展上下文时退 localStorage */ }
 
   const btn = document.createElement("button");
   btn.textContent = "🎙 AI 配音";
@@ -75,14 +95,14 @@
   };
   document.documentElement.appendChild(tgl);
 
-  // 配音输出语言：本地记住，下次点击生效（缓存键含语言，互不覆盖）
+  // 配音输出语言：chrome.storage 优先（面板/管理页可改），写回双写保持兼容
   const langSel = document.createElement("select");
   langSel.innerHTML =
     '<option value="zh">🌐 中文</option>' +
     '<option value="en">🌐 English</option>' +
     '<option value="ja">🌐 日本語</option>' +
     '<option value="ko">🌐 한국어</option>';
-  langSel.value = localStorage.getItem("dub_lang") || "zh";
+  langSel.value = lang;
   Object.assign(langSel.style, {
     position: "fixed", top: "58px", right: "136px", zIndex: 2147483647,
     padding: "7px 12px", borderRadius: "999px", border: "0", cursor: "pointer",
@@ -91,12 +111,16 @@
     appearance: "none", WebkitAppearance: "none",
   });
   langSel.title = "配音输出语言（对当前任务无影响，下次点击生效）";
-  langSel.onchange = () => localStorage.setItem("dub_lang", langSel.value);
+  langSel.onchange = () => {
+    lang = langSel.value;
+    localStorage.setItem("dub_lang", lang);
+    try { chrome.storage.local.set({ dub_lang: lang }); } catch (_) {}
+  };
   document.documentElement.appendChild(langSel);
 
   function fail(msg) {
     if (timer) clearInterval(timer);
-    show("❌ " + msg, 15000);
+    show("❌ " + msg, 15000, true);
     btn.style.display = "block";
   }
 
@@ -180,8 +204,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          url: c.url, referer: location.href,
-          lang: localStorage.getItem("dub_lang") || "zh",
+          url: c.url, referer: location.href, lang,
         }),
       });
       job = await r.json();
@@ -230,7 +253,7 @@
     tgl.textContent = "🔈 切回原声";
     btn.textContent = "🎙 AI 配音";
     btn.style.display = "block";
-    show("⚠️ 检测到视频已切换（自动连播下一集）——配音是上一集的，已切回原声。点「AI 配音」为新视频配音", 12000);
+    show("⚠️ 检测到视频已切换（自动连播下一集）——配音是上一集的，已切回原声。点「AI 配音」为新视频配音", 12000, true);
   }
 
   function mediaChanged(v) {
@@ -324,7 +347,7 @@
 
   function startPlayer() {
     const video = biggestVideo();
-    if (!video) { show("页面上没找到 <video>", 6000); btn.style.display = "block"; return; }
+    if (!video) { show("页面上没找到 <video>", 6000, true); btn.style.display = "block"; return; }
     player.started = true;
     player.video = video;
     player.mode = "dub";
@@ -356,7 +379,7 @@
     const a = el();
     const go = () => {
       if (player.video && !player.video.paused && a.paused) {
-        a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000));
+        a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000, true));
       }
     };
     if (a.readyState >= 2) go();
@@ -406,7 +429,7 @@
         el().pause();
         nEl.playbackRate = video.playbackRate * player.align;
         nEl.currentTime = off;
-        if (!video.paused) nEl.play().catch((e) => show("❌ 换段播放失败：" + e.message, 6000));
+        if (!video.paused) nEl.play().catch((e) => show("❌ 换段播放失败：" + e.message, 6000, true));
         player.curEl = 1 - player.curEl;
         player.cur = c.i;
         video.muted = true;
@@ -435,7 +458,7 @@
           video.muted = true;
           preloadNext(c.i);
           console.log(`[dub] 段${c.i} blob 播放 off=${off.toFixed(1)}s`);
-        }).catch((e) => show("❌ 取段音频失败：" + e.message, 8000));
+        }).catch((e) => show("❌ 取段音频失败：" + e.message, 8000, true));
       }
     } else if (!video.paused) {
       const a = el();
