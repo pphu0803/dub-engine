@@ -18,6 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("serve", help="启动本地服务（浏览器插件后端）")
     s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--llm-base", default="", help="OpenAI 兼容接口地址（如 https://api.deepseek.com/v1）")
+    s.add_argument("--llm-key", default="", help="LLM API key（也可用 config.json 或环境变量）")
+    s.add_argument("--llm-model", default="", help="模型名（如 deepseek-chat）")
 
     r = sub.add_parser("run", help="跑完整管线")
     r.add_argument("--input", required=True, help="本地媒体文件（mp4/mkv/m4s/wav 都行）")
@@ -49,7 +52,7 @@ def main(argv=None) -> int:
     if args.cmd == "serve":
         from .serve import serve
 
-        serve(args.port)
+        serve(args.port, args.llm_base, args.llm_key, args.llm_model)
         return 0
 
     opts = Options(

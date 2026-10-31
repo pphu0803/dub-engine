@@ -30,6 +30,23 @@ UA = (
 JOBS: dict[str, dict] = {}
 JOBS_BY_KEY: dict[str, str] = {}
 _ACTIVE = threading.Lock()  # 同一时间只允许一个 job 占 GPU
+LLM_CFG = {"base": "", "key": "", "model": ""}
+
+
+def _load_llm_config(cli: dict) -> dict:
+    """LLM 配置三级优先：CLI 参数 > 环境变量 > config.json（不入库）。"""
+    workdir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = {}
+    p = os.path.join(workdir, "config.json")
+    if os.path.exists(p):
+        try:
+            cfg = json.load(open(p, encoding="utf-8")).get("llm", {}) or {}
+        except Exception:
+            cfg = {}
+    merged = {}
+    for k, env_k in (("base", "DUB_LLM_BASE"), ("key", "DUB_LLM_KEY"), ("model", "DUB_LLM_MODEL")):
+        merged[k] = (cli.get(k) or os.environ.get(env_k, "") or str(cfg.get(k, ""))).strip()
+    return merged
 
 
 def _looks_like_audio(head: bytes) -> bool:
@@ -159,9 +176,9 @@ def start_job(payload: dict, workdir: str) -> dict:
             try:
                 streaming.run_job(
                     job, src, lang, job["source_lang"], tts_backend, workdir,
-                    api_base=os.environ.get("DUB_LLM_BASE", ""),
-                    api_key=os.environ.get("DUB_LLM_KEY", ""),
-                    llm_model=os.environ.get("DUB_LLM_MODEL", ""),
+                    api_base=LLM_CFG["base"],
+                    api_key=LLM_CFG["key"],
+                    llm_model=LLM_CFG["model"],
                 )
             except Exception as exc:
                 job["status"] = "error"
@@ -267,7 +284,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def serve(port: int = 8765) -> None:
+def serve(port: int = 8765, llm_base: str = "", llm_key: str = "", llm_model: str = "") -> None:
+    global LLM_CFG
+    LLM_CFG = _load_llm_config({"base": llm_base, "key": llm_key, "model": llm_model})
+    if LLM_CFG["base"] and LLM_CFG["key"]:
+        print(f"[serve] LLM: {LLM_CFG['model'] or '(默认模型)'} @ {LLM_CFG['base']}")
+    else:
+        print("[serve] 未配置 LLM（config.json / 环境变量 / --llm-* 三选一），翻译将不可用")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"[serve] http://127.0.0.1:{port}  (Ctrl+C 退出)")
     httpd.serve_forever()

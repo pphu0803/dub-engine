@@ -1,269 +1,139 @@
-# dub-engine
+# dub-engine — 网页视频 AI 实时配音
 
-网页视频 AI 配音引擎。当前进度：**v0.5（2026-10-31）**——分段流式全链路 + 浏览器插件，真机验收通过。
+> 打开视频网站，一键把当前视频的语言转成中文配音——无需下载，无需剪辑，浏览器里直接看。
+> **Watch any web video with AI dubbing in your language — no downloads, no editing, right in the browser.**
 
-## 现在能做什么
+在 B 站视频页点一下「🎙 AI 配音」，约两分钟后配音开始播放：**原视频的背景音乐和音效原样保留，只有台词被换成了中文**，并与画面节奏对齐。处理在你的电脑上分段流式进行——第一分钟先出声，后面边看边出，处理速度始终快于播放速度。
 
-```
-浏览器插件 ──POST──▶ 引擎（127.0.0.1:8765）
-                      取音轨(内容哈希缓存) → 按静音点切 ~60s 段 → 逐段流水线：
-                      [段k] Demucs → VAD → Whisper(+幻觉过滤) → 说话人注册表
-                            → LLM翻译(默认中文) → F0画像匹配音色TTS → 段内混音
-                      段0 完成（~2min）即回传，边播边出；失败段可单独续跑
-插件 ◀──段级 mp3── 段 0 好了就响：双元素乒乓播放，跟随 video 同步，
-                    seek 到未完成段自动回退原声
-```
+## 它能做什么
 
-- ✅ 真机验收（B 站 + YouTube）：第一段出声 ~2min，段处理 ~45s < 60s 段长（越听越攒余量）；重复请求/刷新页面秒回缓存；单段失败不影响其余段可听，可续跑。
-- **F0 画像是硬约束**：性别/年龄段必须对得上（老年男不配年轻女），pyin 基频 + 频谱质心，闭环验证过。
-- 🧪 全链路可以用 `--asr stub --mt stub --tts stub` 跑通，验证时间轴和混音。
+1. **捕获音轨**：插件自动找到当前视频的音轨地址（不下载整个视频）
+2. **本地流水线**：人声分离（Demucs）→ 语音识别（Whisper）→ LLM 翻译 → AI 配音 → 句子级对齐混音，全程在你的 GPU 上分段进行
+3. **流式回传**：第一段完成即开始播放；处理速度（每分钟片段约 45 秒处理）持续快于播放速度
+4. **随时切回**：原声 / 配音一键切换；进度条随便拖
 
-## 目录
+## 特性
 
-```
-dub/
-  pipeline.py   编排 + 缓存（按输入哈希分目录，哪步坏了只重跑那步）
-  stages.py     extract / separate / asr+VAD+幻觉过滤 / translate / tts / assemble
-  diarize.py    CAM++ 嵌入 + 层次聚类 → speaker 标签
-  campplus.py   CAM++ 网络定义（vendor 自 3D-Speaker，Apache-2.0）
-  audio.py      读写、重采样、time-stretch、ducking 包络
-  doctor.py     环境自检
-  cli.py        命令行
-models/
-  campplus_cn_common.bin   CAM++ 权重（ModelScope，不入库）
-tools/
-  probe_media.py        测音轨获取速度
-  decode_audio.py       媒体 → PCM
-  make_clip.py          切测试素材
-  hf_fastdl.py          HF 模型并行下载（LFS 大文件走 ModelScope，见下文）
-  browser/collect.js    在视频页找音轨地址
-  remote/*.ps1          远程机器部署脚本
-```
+- **准实时**：分段流式架构（~60 秒/段），无需等待整片处理完
+- **节奏对齐**：句子级切分，每句起点对齐原句、语速自动贴合到下一句起点，台词跟着表演和口型走
+- **多说话人**：说话人自动分组（声纹聚类），不同说话人分配性别/年龄匹配的不同音色
+- **背景保留**：人声分离只换台词，背景音乐、环境音、音效原样保留
+- **本地优先**：音视频全部本地处理；只有台词文本发送给你自己配置的 LLM
+- **断点缓存**：同一视频重复配音秒级返回；单段失败不影响其余段落，一键续跑
+- **兼容浏览器**：Chrome / Edge（MV3 插件）
 
----
+## 当前限制
 
-## 在 rog-windows 上跑
+- **站点**：目前支持 B 站（DASH 音轨直链）；YouTube 部分可用，其他站点待适配
+- **目标语言**：目前仅支持**输出中文**（架构已支持任意语言，配置开放中）
+- **硬件**：需要本机 GPU（实测 AMD ROCm 可用，应兼容 NVIDIA；纯 CPU 速度不可用）
+- **首次运行**：需下载模型（Whisper ~1.6 GB、Demucs ~80 MB，自动进行）
+- 翻译质量取决于你配置的 LLM；连续强 BGM 场景下人声分离会有残留
 
-### 机器事实（2026-10 实测）
+## 快速开始
 
-```
-CPU   AMD Ryzen AI MAX+ 395  16C/32T
-RAM   123.6 GB 统一内存
-GPU   Radeon 8060S（gfx1151），ROCm 7.2，torch 可见 78.2 GB 显存
+### 0. 准备
+
+- Python 3.10+ 与 Git
+- 本机 GPU（AMD ROCm 或 NVIDIA CUDA 版 PyTorch，按你的平台安装）
+- 一个 **OpenAI 兼容**的 LLM API Key（DeepSeek、通义、Kimi、OpenAI 等均可）
+
+### 1. 安装
+
+```bash
+git clone https://github.com/pphu0803/dub-engine.git
+cd dub-engine
+pip install -r requirements.txt
+# torch 按你的 GPU 平台自行安装，例如 NVIDIA：
+# pip install torch --index-url https://download.pytorch.org/whl/cu121
 ```
 
-### 两个 Python，别搞混
+### 2. 配置 LLM（三选一）
 
-| 用途 | 解释器 | 说明 |
-|---|---|---|
-| **主环境**（ROCm torch、numpy、soundfile、librosa、av、transformers、edge-tts） | `H:\SHARE\ComfyUI\miniconda3\envs\comfyui\python.exe` | ComfyUI 的 conda 环境，自带 ROCm 版 torch |
-| **装 demucs 的环境** | `C:\code\dub\venv\Scripts\python.exe` | 从上面那个 venv 出来，`--system-site-packages` 复用 torch，只多装了 demucs + einops + julius |
+**方式 A — 配置文件（推荐）**：
 
-ffmpeg 不在 PATH，实际在：
-
-```
-H:\SHARE\ComfyUI\miniconda3\envs\comfyui\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe
+```bash
+cp config.example.json config.json
+# 编辑 config.json，填入你的 base / key / model
 ```
 
-`doctor` 和 `make_clip` 会自动从 `imageio_ffmpeg` 找到它，不用配 PATH。
+**方式 B — 环境变量**：
 
-### 自检
-
-```powershell
-cd C:\code\dub\dub-engine
-C:\code\dub\venv\Scripts\python.exe -m dub doctor
+```bash
+export DUB_LLM_BASE="https://api.deepseek.com/v1"
+export DUB_LLM_KEY="sk-..."
+export DUB_LLM_MODEL="deepseek-chat"
 ```
 
-期望看到：
+**方式 C — 启动参数**：
 
-```
-GPU         : AMD Radeon(TM) 8060S Graphics / 78.2 GB / ROCm 7.2.0
-  ok torch            2.10.0+rocm7.12.0a20260311
-  ok demucs           ...
+```bash
+python -m dub serve --llm-base "https://api.deepseek.com/v1" --llm-key "sk-..." --llm-model "deepseek-chat"
 ```
 
-### 跑一段（先用 stub 验证管线）
+### 3. 启动引擎
 
-```powershell
-# 从已下载的 B 站音轨切 120 秒
-C:\code\dub\venv\Scripts\python.exe tools\make_clip.py `
-  --in data\upos-sz-mirrorhw.bilivideo.com_41835920.m4s `
-  --out data\clip120.wav --start 60 --seconds 120
-
-# 全链路（stub 识别/翻译/合成，真分离）
-C:\code\dub\venv\Scripts\python.exe -m dub run `
-  --input data\clip120.wav `
-  --asr stub --mt stub --tts stub `
-  --out out\test_sep.wav
+```bash
+python -m dub serve --port 8765
 ```
 
-实测（2026-10-30，120 s B 站植物纪录片片段）：
+### 4. 安装浏览器插件
 
-| 阶段 | 耗时 | 备注 |
-|---|---|---|
-| extract | 0.4 s | |
-| **separate（Demucs, ROCm）** | **21–25 s** | 模型常驻缓存（serve 跨 job 免加载） |
-| **asr（whisper-large-v3-turbo, fp16 GPU）** | **~124 s / 7.7min 音频**（旧基线 179.7s） | VAD 区列表批推理 batch_size=4 + **TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1**（ROCm 实验 attention 内核，A/B 稳定快 ~30%，未开启时 torch 走慢路径且方差巨大 193-315s）；区块 >28s 自动开 chunk_length_s（防 30s 窗口静默截断）；pipeline 常驻缓存 |
-| translate（deepseek-flash） | 13.4 s | 20 段/次批量 |
-| tts（edge, 6 路并发） | **2.8 s**（clip 9 段；69 段从 109s 降至 ~25s） | 逐段 3 次退避重试 |
-| assemble | 0.3 s | |
+1. 打开 `chrome://extensions`（Edge 为 `edge://extensions`）
+2. 开启「开发者模式」→「加载解压缩的扩展程序」
+3. 选择本仓库的 `extension/` 目录
 
-**全链实测（7.7min B 站片，2026-10-31 优化后）**：约 7 min → **预计 ~4.2 min（≈0.55× 视频时长）**。Demucs（~5× 实时）是剩余大头，换模型会掉质量，暂不动。
+### 5. 使用
 
-### 第一版复现命令（中→英示例）
+1. 打开一个 B 站视频，**播放 2 秒**（让音轨地址出现）
+2. 点右上角「🎙 AI 配音」
+3. 约两分钟后第一段配音开始播放，之后边看边出
+4. 右上角可随时**切回原声 / 切回配音**，进度条随便拖
 
-```powershell
-$env:DUB_LLM_BASE = "https://api.deepseek.com/v1"    # 任何 OpenAI 兼容接口都行
-$env:DUB_LLM_KEY  = "sk-..."
-$env:DUB_LLM_MODEL = "deepseek-flash"
-C:\code\dub\venv\Scripts\python.exe -m dub run `
-  --input data\clip120.wav --asr transformers --mt llm --tts edge `
-  --lang en --chars-per-sec 12 `
-  --out out\first_v3.wav
-```
-
-- **不带 `--voice` = 多音色模式**：diarize 的说话人序号索引 `EDGE_SPEAKER_VOICES[lang]` 音色池；显式给 `--voice` 则全程单音色。**注意 `--voice` 参与缓存 key**：带不带会落到不同 work 目录。
-- **`--chars-per-sec` 按目标语言调**：中文 4.5（默认），英文 12——预算直接进翻译 prompt，调对了 overflow 才低。
-- `--force` 少写哪步哪步不重做（如上游 asr 变了要 `--force trans,tts,final`）。
-
-> 跑的时候会刷一屏 `MIOpen(HIP): Error ... gfx908_metadata.tn.model`。这是 ROCm 缺预编译启发式文件，不影响结果。嫌吵就设 `MIOPEN_LOG_LEVEL=3`。
-
-### 接真模型
-
-**ASR**：AMD 上 `faster-whisper`（CTranslate2）只能走 CPU，别指望 GPU。走 `transformers` 后端：
-
-```powershell
-$env:HF_ENDPOINT = "https://hf-mirror.com"   # 国内加速，可选
-C:\code\dub\venv\Scripts\python.exe -m dub run `
-  --input data\clip120.wav --asr transformers `
-  --mt stub --tts stub --out out\test_asr.wav
-```
-
-首次会下 `openai/whisper-large-v3-turbo`（约 1.6 GB）。**别用多连接并行 Range 下载 HF 大文件**——hf-mirror 对 LFS 直接 302 到 huggingface.co 的 xet CDN，实测并行分片两轮全量下载 sha256 都不匹配（坏字节），单流又只有 ~230KB/s。可靠姿势（实测 5.2MB/s，字节与 HF 逐位一致）：
-
-```powershell
-# ModelScope 国内镜像单流下载 → 校验 → 种进 HF 缓存
-curl -sL -C - -o model.safetensors --retry 8 `
-  "https://modelscope.cn/models/AI-ModelScope/whisper-large-v3-turbo/resolve/master/model.safetensors"
-# sha256 应为 542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1
-# 然后放入 %USERPROFILE%\.cache\huggingface\hub\models--openai--whisper-large-v3-turbo\
-#   blobs\<sha256> 与 snapshots\<rev>\model.safetensors（本机拷贝模式，非符号链接）
-```
-
-仓库里的 `tools\hf_fastdl.py` 是并行下载器（含分片断点续传与 X-Linked-ETag 校验参照），适合小文件/非 LFS；LFS 大文件请走上面的 ModelScope 路子。
-
-想省显存可以改 `stages.py` 里的 `model_id` 为 `openai/whisper-small`。
-
-**翻译**：任何 OpenAI 兼容接口都能接。
-
-```powershell
-$env:DUB_LLM_BASE  = "https://api.deepseek.com/v1"
-$env:DUB_LLM_KEY   = "sk-..."
-$env:DUB_LLM_MODEL = "deepseek-chat"
-
-C:\code\dub\venv\Scripts\python.exe -m dub run `
-  --input data\clip120.wav --asr transformers --mt llm --tts edge `
-  --lang zh --out out\test_zh.wav
-```
-
-翻译会按 `--chars-per-sec 4.5` 给每行算字数预算，写进 prompt 里逼模型压缩。
-
-**TTS**：
-- `--tts edge`：零门槛，`edge-tts` 已装，用微软在线音色（`zh-CN-XiaoxiaoNeural` 等），**不做音色克隆**，适合先跑通。
-- `--tts cosyvoice`：本地克隆，需要 `DUB_COSYVOICE_DIR`、`DUB_COSYVOICE_MODEL` 和 `--ref-wav`，模型还没装。
-
----
-
-## 管线细节
-
-### 缓存
-
-工作目录 `work/<hash>/`，hash 由「输入路径 + 大小 + mtime + 语言 + 各后端 + 音色」算出。每一步产物落盘：
+## 工作原理
 
 ```
-work/<hash>/
-  mix.wav       抽取后的 44.1k 立体声
-  vocals.wav    分离出的人声
-  bed.wav       去掉人声的伴奏
-  asr.json      识别结果
-  trans.json    翻译结果
-  tts/seg_*.wav 逐句合成
-  final.wav     混音成品
-  summary.json  各阶段耗时
+浏览器插件 ──音轨URL──▶ 本地引擎（127.0.0.1:8765）
+                          │
+                          ▼
+        按静音点切 ~60s 段，段间流水线（段0优先）：
+        Demucs 人声分离 → VAD → Whisper 识别 → 说话人声纹聚类
+        → LLM 翻译（按窗口字数预算压缩）→ F0 画像匹配音色 TTS
+        → 句子级对齐混音（背景保留，逐句贴合原句节奏）
+                          │
+插件 ◀──段级 mp3──────── 段 0 完成即回传，边播边出
 ```
 
-改一个参数会生成新目录；只想重跑某步用 `--force trans`（逗号分隔：`mix,bed,asr,trans,tts,final`）。
+- **对齐**：每句配音的起点对齐原句起点，语速自动贴合到下一句起点——台词跟着表演走
+- **说话人**：声纹嵌入 + 层次聚类，跨段编号一致；每个说话人按基频/音色匹配中文配音声线（性别与年龄段对得上）
+- **缓存**：任务按音轨内容哈希 + 目标语言命名，重复请求秒级返回；中断续跑
 
-### 混音逻辑
-
-- 用 `bed.wav`（去人声）当底，不用原始混音——这样即使分离有残留也不会把原声放两遍。
-- 说话段对 bed 做 **-8 dB 闪避**（`--duck-db`），120 ms 起音 / 250 ms 释放。
-- 配音若比原句长 5% 以上，用 librosa 的 time-stretch 压回去，最多 1.25×（`max_stretch`）。
-- 成品峰值归一化到 -1 dBFS。
-
-### 失败兜底
-
-分离失败（模型没装、显存不够）会自动退回 **duck 模式**：不分离，直接把原混音压低叠配音。`summary.json` 里 `"separated": false` 会标出来。
-
----
-
-## 已知问题
-
-1. **`torchaudio.load` 在 2.10 要 torchcodec**，所以分离阶段绕开 torchaudio，改走 soundfile。别改回去。
-2. **MIOpen 报错刷屏**：ROCm 缺 gfx908 启发式文件，纯噪音。`MIOPEN_LOG_LEVEL=3` 可压。
-3. **`faster-whisper` 在 AMD 上没 GPU 加速**，只能 CPU；GPU 走 `transformers`。
-4. **ASR 稳定性三连**：① 配乐吟唱段的幻觉循环已由 VAD 切区 + 文本过滤双保险治理（VAD 本身救不了哼唱——silero 判其为人声，能量也不低，只能靠文本信号）；② **whisper 中文繁简摇摆**——同一段音频三次运行三种繁简度（"极端恶劣"→"極端惡劣"），想稳定给 `--source-lang zh`；③ VAD 边缘区摇摆（语音总长 73.9~76.9s 漂），分段数随之漂。全轨长音频模式在混语料上会**把英文解说转成中文循环幻觉**——VAD 逐区转写后该段转出流利英文（这就是 v1"误杀 23s 真解说"的真相）。
-5. **edge-tts 必须 ≥7.3.1**：conda 里自带的 7.2.8 连微软 WebSocket 直接 403（Sec-MS-GEC 校验变了）。已在 venv 内升级遮蔽，不动 conda 基座。**偶发瞬时 403 已加重试（3 次退避）**。
-6. **conda 的 modelscope 包是残缺的**（缺 addict/datasets 一串依赖，装齐要拉全家桶）——别用。CAM++ 走 vendor 路线：`dub/campplus.py`（网络定义）+ `models/campplus_cn_common.bin`（28MB，ModelScope 直下 13MB/s）。前处理 = torchaudio kaldi fbank + 句级均值归一（**fbank 输入要 2D**，1D 会 IndexError）；`CAMPPlus(embedding_size=192)`（默认 512 会对不上权重）。正确性用官方 example 验过：同说话人 cos 0.69 / 异 -0.08。
-7. **CosyVoice2 音色克隆：已验收环境、产出乱语，判 parked（2026-10-31）**。全过程：
-   - **已打通**：仓库+Matcha 子模块+3.8GB 权重（ModelScope 13MB/s）；8 个依赖坑（addict/HyperPyYAML/lightning/pkg_resources<81/gdown/wget/pyarrow/pyworld/openai-whisper）；torchaudio 2.10 补丁（`load_wav` 改 soundfile，v2.0 与 master 签名不同各打一份）；LLM 权重是 bf16 而 ROCm matmul 报 dtype 错 → 三件套 `.float()`；v2.0 API 传 16k tensor、master 传路径。
-   - **症状**：合成跑通但输出乱语——时长撞 max_len 天花板（40 字出 32.8s）、女声参考克隆出 126Hz 男声、whisper 回读为空。
-   - **已排除**：ROCm 数值（CPU 推理结果一致）、权重错位（strict=True）、文本 token（与 BlankEN tokenizer 逐 id 一致）、repo 版本（master 与 v2.0 结果一致）、mel padding（见下）。
-   - **S1/S2 实验（2026-10-31）**：S1 实锤 speech tokenizer 对 mel padding 敏感——不 pad 348 帧→87 token，pad 到 30s（whisper-20231117 默认行为，官方 pin 的版本）→3000 帧→750 token，前缀 39/87 不同。但 S2 恢复 padding 后仍乱生成 → **假说被否决**，tokenizer 不是病根。
-   - **剩余嫌疑**：torch 2.10（pin 2.3.1）/ transformers 5.x（pin 4.51.3）的 Qwen2 骨干行为差异。**修复要降级共享的 ComfyUI conda 环境——不做**。
-   - **复产路径**：独立环境（单独 venv pin torch==2.3.1+cu121），最佳宿主是 3060 机（原生 CUDA）。权重留在 `C:\code\dub\models\cosyvoice2-0.5B`、补丁留在 `C:\code\dub\CosyVoice`（v2.0 tag，工作树有 load_wav 补丁未提交）。
-   - **当前方案**：说话人音色用 F0 画像 → edge 音色池匹配（`EDGE_VOICE_BY_PROFILE`），性别/年龄保真已满足验收；克隆质量"不要求保真"，边际收益有限。
-8. ~~缓存判断 bug~~（已修 2026-10-30）：`_need("mix")` 查的是 `mix` 不是 `mix.wav`，导致缓存永远 miss、每次全量重跑。现已用 `CACHE_FILES` 短名映射表修正。另注意 `--force` 不含 `final` 时，上游变了混音不会重做。
-
----
-
-## 下一步（按优先级）
-
-1. ~~跑通真 ASR~~：✅ 2026-10-30。
-2. ~~全链路第一版~~：✅ 2026-10-30。
-3. ~~diarization + VAD~~：✅ 2026-10-30。
-4. ~~默认中文 + 性别/年龄匹配音色~~：✅ 2026-10-30（v4a，F0 画像硬约束）。
-5. **音色克隆**：parked，复产路径见已知问题 7（独立 pinned 环境，3060 机优先）。
-6. **音色距离约束**：见 v2 架构文档第 2.4 节。
-7. **回灌到浏览器**：把成品音轨按时间轴喂给 `<video>`，做"绿灯"交互。
-
-## 浏览器插件（v0.1）
+## 项目结构
 
 ```
-插件 (MV3)                                本地引擎
-  content.js  注入按钮/状态pill/同步播放     POST /api/dub {url, referer} 或 {path}
-      ⇅ chrome.runtime                     GET  /api/job/<id>       阶段/时间轴
-  background.js  webRequest 抓音轨URL  ⇄   GET  /api/job/<id>/audio 成品mp3
-  （5s 窗口，audio 命中词优先）              （127.0.0.1:8765，GPU 串行）
+dub/            引擎：流水线、分段调度、说话人、声学画像、HTTP 服务
+extension/      浏览器插件（MV3，纯内容脚本，无后台进程、零权限）
+tools/          音轨探测等辅助脚本
+config.example.json   LLM 配置模板（复制为 config.json 使用）
 ```
 
-**启动**：
+## Roadmap
 
-```powershell
-# 1. 起引擎（需要 LLM 环境变量，同 run）
-C:\code\dub\venv\Scripts\python.exe -m dub serve --port 8765
-# 2. 浏览器（Edge/Chrome）→ 扩展管理 → 开发人员模式 → 加载解压缩扩展
-#    选 C:\code\dub\dub-engine\extension\
-# 3. 打开视频页 → 播放 2 秒 → 点右上角「🎙 AI 配音」→ 等进度 → 自动切换
-```
+- [ ] 更多站点：YouTube 完整支持、通用 HLS/m3u8、通用网页自动适配
+- [ ] 多目标语言（英/日/韩输出）
+- [ ] 音色克隆：让中文配音保留原说话人的音色
+- [ ] 口型级对齐（音素级时间戳）
+- [ ] 安装器打包 / Firefox 支持
 
-**同步播放**：原声静音，Audio 元素播配音母版（bed+配音），play/pause/seek/倍速全跟随，漂移 >0.35s 自动校正。音频经 service worker fetch → blob URL 回传页面，绕开 https→http 混合内容限制；服务端所有响应带 CORS + PNA 头。
+## 致谢
 
-**v1 限制**：只支持直链音轨（B 站 DASH audio m4s ✓，HLS/m3u8 未接）；一次只跑一个 job。
+- [Demucs](https://github.com/adefossez/demucs)（Meta, MIT）— 音乐/人声分离
+- [Whisper](https://github.com/openai/whisper)（OpenAI, MIT）— 语音识别
+- [silero-vad](https://github.com/snakers4/silero-vad)（MIT）— 语音活动检测
+- [3D-Speaker / CAM++](https://github.com/modelscope/3D-Speaker)（Apache-2.0）— 说话人嵌入
+- [edge-tts](https://github.com/rany2/edge-tts)（GPL-3.0）— 语音合成
+- [Librosa](https://github.com/librosa/librosa)（ISC）— 音频处理
 
-**v0.2→v0.5 真机迭代记录（2026-10-31，插件形态一天内五版）**：
-- v0.1 三连翻车根因一个：**MV3 service worker 闲置 30s 被杀**（消息链蒸发/内存记录清零/job 从未提交）→ 架构改纯 content script（无 background、零权限）。
-- 音轨挑选：页面自报（performance 资源历史 + video src）为主，支持无扩展名流式端点（YT `videoplayback` + 音频 itag）。
-- v0.4 播放无声根因：**媒体元素直连 localhost 被 PNA 拦**（no-cors 媒体子资源 error 4，而 fetch 放行）→ 分段音频一律 fetch→blob→播放；双元素乒乓预载消边界缺口。IAB（ZCode 内置浏览器）在真实 B 站页复现+验证，是本轮最高效的诊断手段。
-- 容错：LLM 直连（trust_env=False）+ 4 次重试；单段失败→partial，已完成段照常可听，再点一次续跑失败段。
-- 性能优化：TTS 6 路并发、whisper 列表批推理 + **AOTRITON 实验内核**（ROCm 不开它走慢路径且方差 193-315s）、pipeline/demucs 常驻；7.7min 片全链 7min→~4.2min。
+## License
+
+[MIT](LICENSE)
