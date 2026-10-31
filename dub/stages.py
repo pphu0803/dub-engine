@@ -370,6 +370,10 @@ def _asr_transformers(path: str, language: str | None, device: str,
             continue
         clips.append(clip)
         spans.append(a)
+    if not clips:
+        # 纯音乐/动作段：本段没有足够长的语音区，直接产出空段（混音只剩背景）
+        print("    [vad] 本段无 ≥1.2s 语音区（音乐/静音），跳过识别")
+        return []
 
     # 短区块（<28s）直读+跨区批推理最快；任一区块超长则必须开 chunk_length_s
     # （whisper 窗口 30s，长区不分会连时间戳带内容被静默截断）
@@ -537,6 +541,9 @@ EDGE_VOICE_BY_PROFILE = {
         ("f", "child"): "zh-CN-XiaoxiaoNeural",
         ("f", "young"): "zh-CN-XiaoxiaoNeural",
         ("f", "mature"): "zh-CN-XiaoyiNeural",
+        ("x", "child"): "zh-CN-XiaoxiaoNeural",
+        ("x", "young"): "zh-CN-XiaoxiaoNeural",
+        ("x", "mature"): "zh-CN-XiaoxiaoNeural",
     },
     "en": {
         ("m", "child"): "en-US-GuyNeural",
@@ -545,6 +552,9 @@ EDGE_VOICE_BY_PROFILE = {
         ("f", "child"): "en-US-AnaNeural",
         ("f", "young"): "en-US-AriaNeural",
         ("f", "mature"): "en-US-MichelleNeural",
+        ("x", "child"): "en-US-AriaNeural",
+        ("x", "young"): "en-US-AriaNeural",
+        ("x", "mature"): "en-US-AriaNeural",
     },
     "ja": {
         ("m", "child"): "ja-JP-KeitaNeural",
@@ -553,6 +563,9 @@ EDGE_VOICE_BY_PROFILE = {
         ("f", "child"): "ja-JP-NanamiNeural",
         ("f", "young"): "ja-JP-NanamiNeural",
         ("f", "mature"): "ja-JP-NanamiNeural",
+        ("x", "child"): "ja-JP-NanamiNeural",
+        ("x", "young"): "ja-JP-NanamiNeural",
+        ("x", "mature"): "ja-JP-NanamiNeural",
     },
     "ko": {
         ("m", "child"): "ko-KR-HyunsuMultilingualNeural",
@@ -561,6 +574,9 @@ EDGE_VOICE_BY_PROFILE = {
         ("f", "child"): "ko-KR-SunHiNeural",
         ("f", "young"): "ko-KR-SunHiNeural",
         ("f", "mature"): "ko-KR-SunHiNeural",
+        ("x", "child"): "ko-KR-SunHiNeural",
+        ("x", "young"): "ko-KR-SunHiNeural",
+        ("x", "mature"): "ko-KR-SunHiNeural",
     },
 }
 
@@ -600,7 +616,8 @@ def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str
             return voice
         if profiles and s.speaker in profiles:
             p = profiles[s.speaker]
-            return by_profile.get((p["gender"], p["age"]), "")
+            # 画像建档可能落在音乐/噪声上 → gender="x"，表里必须有兜底，绝不能返回空声线
+            return by_profile.get((p["gender"], p["age"])) or pool[s.speaker % len(pool)]
         return pool[s.speaker % len(pool)]
 
     if backend == "edge":
