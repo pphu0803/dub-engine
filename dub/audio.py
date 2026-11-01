@@ -67,9 +67,32 @@ def time_stretch(data: np.ndarray, sr: int, rate: float) -> np.ndarray:
 
 
 def pitch_shift(data: np.ndarray, sr: int, semitones: float) -> np.ndarray:
-    """变调不变速。semitones>0 升 key；负值降 key（男声低沉显沧桑）。"""
+    """变调不变速。semitones>0 升 key；负值降 key（男声低沉显沧桑）。
+    主路径 asetrate+atempo：asetrate 是纯重采样（无相位声码器的金属/电子感），
+    atempo 时域 WSOLA 把时长拉回，语音听感自然；librosa 相位声码器留作退路。"""
     if abs(semitones) < 0.01:
         return data
+    semitones = max(-7.0, min(7.0, semitones))
+    r = 2.0 ** (semitones / 12.0)  # 频率比
+    ch = data.shape[1]
+    raw = np.ascontiguousarray(data, dtype=np.float32).tobytes()
+    try:
+        import subprocess
+
+        import imageio_ffmpeg
+
+        af = f"asetrate={int(sr * r)},aresample={int(sr)},atempo={1 / r:.6f}"
+        p = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-loglevel", "error",
+             "-f", "f32le", "-ar", str(int(sr)), "-ac", str(ch), "-i", "pipe:",
+             "-af", af, "-f", "f32le", "-ar", str(int(sr)), "-ac", str(ch), "pipe:"],
+            input=raw, capture_output=True, timeout=120)
+        p.check_returncode()
+        out = np.frombuffer(p.stdout, dtype=np.float32)
+        if out.size >= ch:
+            return out[: out.size // ch * ch].reshape(-1, ch).copy()
+    except Exception:
+        pass
     import librosa
 
     chans = [librosa.effects.pitch_shift(data[:, c], sr=sr, n_steps=semitones)
