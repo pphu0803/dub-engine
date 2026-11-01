@@ -151,20 +151,26 @@
 
   // -------------------------------------------------------------- 任务列表
 
+  const esc = (s) => String(s || "").replace(/[&<>"']/g,
+    (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
   function renderJobs(jobs) {
     const tb = $("jobsBody");
     $("jobsEmpty").style.display = jobs.length ? "none" : "block";
     tb.innerHTML = jobs.map((j) => {
       const [txt, cls] = STAT[j.status] || [j.status, ""];
       const name = j.id.length > 8 ? j.id.slice(0, 8) + "…" : j.id;
+      const head = j.title
+        ? `<b style="font-size:12.5px">${esc(j.title)}</b><div class="hint" style="margin-top:2px"><code>${name}</code></div>`
+        : `<code>${name}</code>`;
       const chips = [j.lang, j.tts_backend, j.active ? "本次会话" : ""].filter(Boolean)
         .map((c) => `<span class="badge">${c}</span>`).join(" ");
-      const err = j.error ? `<div class="hint">${j.error}</div>` : "";
+      const err = j.error ? `<div class="hint">${esc(j.error)}</div>` : "";
       const ops = [];
       if (j.final) ops.push(`<a href="${SERVER}/api/job/${j.id}/audio" target="_blank">试听</a>`);
       ops.push(`<a href="javascript:void(0)" data-del="${j.id}">删除</a>`);
       return `<tr>
-        <td><code>${name}</code><div style="margin-top:3px">${chips}</div></td>
+        <td>${head}<div style="margin-top:3px">${chips}</div></td>
         <td><span class="badge ${cls}">${txt}</span>${err}</td>
         <td>${j.chunks_done}/${j.chunks_total || "?"} 段${j.segments_total ? `<div class="hint">${j.segments_total} 句</div>` : ""}</td>
         <td>${fmtDur(j.duration)}${j.total_s ? `<div class="hint">耗时 ${fmtDur(j.total_s)}</div>` : ""}</td>

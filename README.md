@@ -101,11 +101,17 @@ pip install -r requirements.txt
 > export HF_ENDPOINT=https://hf-mirror.com
 > ```
 
-## 配置 LLM（三选一）
+## 配置 LLM（插件管理页或三种服务端方式）
 
-引擎需要一个 OpenAI 兼容的 LLM 来翻译台词。**优先级：启动参数 > 环境变量 > config.json**。
+引擎需要一个 OpenAI 兼容的 LLM 来翻译台词。**服务端方式优先级：启动参数 > 环境变量 > config.json**。
 
-### 方式 A — 配置文件（推荐）
+### 方式 ⓪ — 插件管理页（推荐，免重启）
+
+装好浏览器插件后（见下文）：点工具栏插件图标 →「⚙ 管理页」→「翻译 LLM」填 base / key / model →「测试连通」（真实调用一次接口验证 key）→「保存」。配置写回 `config.json` 并对**下一个任务立即生效**，无需重启引擎。
+
+以下为服务端方式（引擎启动时读取）：
+
+### 方式 A — 配置文件
 
 ```bash
 cp config.example.json config.json
@@ -148,7 +154,7 @@ export DUB_LLM_MODEL="deepseek-chat"
 | `edge`（默认） | 微软 Edge 神经声线，覆盖中/英/日/韩 | 无需配置 |
 | `mimo` | 小米 MiMo 云端 TTS（24kHz WAV，中文听感更自然；声线：茉莉/苏打/白桦/Mia/Milo/Dean 等） | config.json `mimo` 段 / `DUB_MIMO_KEY` / `--mimo-key` |
 
-切换默认后端：config.json `"tts_backend": "mimo"`，或启动参数 `--tts-backend mimo`，或请求里带 `"tts_backend"`（优先级最高）。说话人按性别/年龄映射声线，映射表在 `dub/stages.py` 的 `MIMO_VOICE_BY_PROFILE`（性别是保守猜测，可自行校准）；ja/ko 走 MiMo 未验证，建议保留 edge。
+切换默认后端：config.json `"tts_backend": "mimo"`，或启动参数 `--tts-backend mimo`，或请求里带 `"tts_backend"`（优先级最高），或插件管理页「配音 TTS」下拉（同样热生效，页内可填 MiMo key 并一键测试）。说话人按性别/年龄映射声线，映射表在 `dub/stages.py` 的 `MIMO_VOICE_BY_PROFILE`（性别是保守猜测，可自行校准）；ja/ko 走 MiMo 未验证，建议保留 edge。
 
 ## 启动本地服务
 
@@ -187,6 +193,15 @@ python -m dub serve --port 8765 \
 2. 开启「开发者模式」→「加载解压缩的扩展程序」
 3. 选择本仓库的 `extension/` 目录
 4. （可选）把插件固定到工具栏
+
+### 工具栏面板与管理页
+
+- 点工具栏插件图标弹出**面板**：引擎状态灯（绿在线 / 蓝处理中 / 红离线）、当前任务进度条、默认语言切换，以及**页面状态灯开关**（关掉后视频页右上角不再显示进度提示，错误仍会弹出）
+- 面板「⚙ 管理页」（或右键图标 →「选项」）打开完整管理页：
+  - **引擎状态**：版本 / 流水线 / 各后端配置态 / 已运行时长
+  - **翻译 LLM / MiMo TTS**：填配置 → 一键测试 → 保存，热生效不用重启引擎
+  - **插件偏好**：默认目标语言（跨站点统一）、页面状态灯开关
+  - **任务列表**：最近任务（含历史），显示标题/语言/后端/进度/耗时，可试听成品、双确认删除
 
 ## 使用方法
 

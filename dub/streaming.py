@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -233,6 +234,45 @@ def _pick_next(todo: list[dict], pos: float | None) -> dict:
     return min(todo, key=dist)
 
 
+def _write_meta(job_dir: str, meta: dict) -> None:
+    """任务元信息落盘（管理页显示真名用）：页面标题尽力抓一次，失败退 referer。"""
+    p = os.path.join(job_dir, "meta.json")
+    meta = dict(meta)
+    meta.setdefault("created", int(time.time()))
+    if os.path.exists(p):  # 续跑时保留已抓到的标题，不重复抓页面
+        try:
+            old = json.load(open(p, encoding="utf-8"))
+            old.update({k: v for k, v in meta.items() if v})
+            meta = old
+        except Exception:
+            pass
+    if meta.get("page") and not meta.get("title"):
+        try:
+            import requests
+
+            # trust_env 是 Session 属性（requests.get 不认），B 站对简陋 UA 会拒
+            sess = requests.Session()
+            sess.trust_env = False
+            sess.headers.update({"User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")})
+            r = sess.get(meta["page"], timeout=(3, 5))
+            r.encoding = r.apparent_encoding or "utf-8"
+            m = re.search(r"<title>([^<]{1,200})</title>", r.text[:65536], re.I)
+            if m:
+                t = m.group(1).strip()
+                for suf in ("_哔哩哔哩_bilibili", "_bilibili", " - YouTube", "- YouTube"):
+                    if t.endswith(suf):
+                        t = t[: -len(suf)]
+                meta["title"] = t.strip()[:120] or meta["page"]
+        except Exception:
+            pass
+    try:
+        json.dump(meta, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
             workdir: str, api_base: str = "", api_key: str = "", llm_model: str = "",
             mimo_base: str = "", mimo_key: str = "") -> None:
@@ -243,6 +283,7 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
                            f"{base}_{lang}_{tts_backend}_{PIPELINE_VER}")
     os.makedirs(job_dir, exist_ok=True)
     job["dir"] = job_dir
+    _write_meta(job_dir, job.get("meta") or {})
     state_path = os.path.join(job_dir, "state.json")
 
     if os.path.exists(state_path):

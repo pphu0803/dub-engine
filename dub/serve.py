@@ -197,6 +197,13 @@ def _job_status_of(chunks: list, d: str) -> tuple[str, str]:
     return "error", "任务曾中断（serve 重启），重新配音续跑"
 
 
+def _read_meta(d: str) -> dict:
+    try:
+        return json.load(open(os.path.join(d, "meta.json"), encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def _disk_job_row(name: str) -> dict | None:
     if not _JOBID_RE.match(name):
         return None
@@ -211,6 +218,7 @@ def _disk_job_row(name: str) -> dict | None:
     chunks = state.get("chunks") or []
     status, note = _job_status_of(chunks, d)
     parts = name.split("_")
+    meta = _read_meta(d)
     return {
         "id": name, "active": False, "status": status,
         "lang": parts[1] if len(parts) >= 4 else "",
@@ -221,6 +229,8 @@ def _disk_job_row(name: str) -> dict | None:
         "segments_total": sum(len(c.get("segments") or []) for c in chunks),
         "error": note, "final": status == "done",
         "mtime": int(os.path.getmtime(sp)),
+        "title": meta.get("title", ""), "page": meta.get("page", ""),
+        "created": meta.get("created", 0),
     }
 
 
@@ -233,6 +243,7 @@ def _jobs_view() -> list[dict]:
         if name:
             seen.add(name)
         sp = os.path.join(d, "state.json") if d else ""
+        meta = _read_meta(d) if d else (job.get("meta") or {})
         rows.append({
             "id": job["id"], "active": True, "status": job["status"],
             "stage": job.get("stage"), "lang": job.get("lang", ""),
@@ -242,6 +253,8 @@ def _jobs_view() -> list[dict]:
             "duration": job.get("duration"), "total_s": job.get("total_s"),
             "error": job.get("error"), "final": job["status"] == "done",
             "mtime": int(os.path.getmtime(sp)) if sp and os.path.exists(sp) else int(time.time()),
+            "title": meta.get("title", ""), "page": meta.get("page", ""),
+            "created": meta.get("created", 0),
         })
     try:
         names = os.listdir(STREAM_DIR)
@@ -437,6 +450,7 @@ def start_job(payload: dict, workdir: str) -> dict:
         "chunks": [], "chunks_done": 0, "src": src, "lang": lang,
         "source_lang": payload.get("source_lang", ""),
         "tts_backend": tts_backend,
+        "meta": {"url": payload.get("url", ""), "page": payload.get("referer", "")},
     }
     JOBS[jid] = job
     JOBS_BY_KEY[key] = jid
