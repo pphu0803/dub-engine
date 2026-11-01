@@ -47,14 +47,17 @@
   let hudOn = true;
   let lang = localStorage.getItem("dub_lang") || "zh";
   try {
-    chrome.storage.local.get({ dub_lang: null, dub_hud: true }, (r) => {
+    chrome.storage.local.get({ dub_lang: null, dub_hud: true, dub_btn_sites: [] }, (r) => {
       if (r.dub_lang) { lang = r.dub_lang; langSel.value = lang; }
       hudOn = r.dub_hud !== false;
+      btnSites = new Set(r.dub_btn_sites || []);
+      updateBtnVis();
     });
     chrome.storage.onChanged.addListener((ch, area) => {
       if (area !== "local") return;
       if ("dub_hud" in ch) hudOn = ch.dub_hud.newValue !== false;
       if ("dub_lang" in ch) { lang = ch.dub_lang.newValue; langSel.value = lang; }
+      if ("dub_btn_sites" in ch) { btnSites = new Set(ch.dub_btn_sites.newValue || []); updateBtnVis(); }
     });
   } catch (_) { /* 无扩展上下文时退 localStorage */ }
 
@@ -65,7 +68,7 @@
     padding: "8px 16px", borderRadius: "999px", border: "0", cursor: "pointer",
     font: "600 13px/1.4 system-ui", color: "#04140c",
     background: "linear-gradient(135deg,#42e695,#3bb2b8)",
-    boxShadow: "0 2px 10px rgba(0,0,0,.35)",
+    boxShadow: "0 2px 10px rgba(0,0,0,.35)", display: "none",
   });
   btn.onclick = () => begin().catch((e) => fail("启动失败：" + e.message));
   document.documentElement.appendChild(btn);
@@ -108,7 +111,7 @@
     padding: "7px 12px", borderRadius: "999px", border: "0", cursor: "pointer",
     font: "600 13px/1.4 system-ui", color: "#fff",
     background: "rgba(20,20,24,.82)", boxShadow: "0 2px 10px rgba(0,0,0,.35)",
-    appearance: "none", WebkitAppearance: "none",
+    appearance: "none", WebkitAppearance: "none", display: "none",
   });
   langSel.title = "配音输出语言（对当前任务无影响，下次点击生效）";
   langSel.onchange = () => {
@@ -121,8 +124,26 @@
   function fail(msg) {
     if (timer) clearInterval(timer);
     show("❌ " + msg, 15000, true);
-    btn.style.display = "block";
+    updateBtnVis();
   }
+
+  // 页面按钮可见性：默认不在网页常驻（非视频页常驻按钮是用户痛点）。
+  // 本站在面板开启「此站显示配音按钮」、或本页配音会话进行中（需要能切回原声）才显示
+  let btnSites = new Set();
+  function updateBtnVis() {
+    const show = btnSites.has(location.origin) || player.started;
+    btn.style.display = show ? "block" : "none";
+    langSel.style.display = show ? "block" : "none";
+  }
+
+  // 面板「配音此页」入口：无 background，content script 直接收消息开配
+  try {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.cmd === "dub" && !timer) {
+        begin().catch((e) => fail("启动失败：" + e.message));
+      }
+    });
+  } catch (_) {}
 
   // ------------------------------------------------------------- 音轨挑选
 
@@ -253,7 +274,7 @@
     tgl.style.display = "none";
     tgl.textContent = "🔈 切回原声";
     btn.textContent = "🎙 AI 配音";
-    btn.style.display = "block";
+    updateBtnVis();
     show("⚠️ 检测到视频已切换（自动连播下一集）——配音是上一集的，已切回原声。点「AI 配音」为新视频配音", 12000, true);
   }
 
@@ -301,7 +322,7 @@
       if (player.started) {
         show(`✅ 全部 ${chunks.length} 段完成（用时 ${st.total_s || "?"}s）`, 8000);
         btn.textContent = "🎙 重新配音";
-        btn.style.display = "block";
+        updateBtnVis();
       } else if (chunks.length) {
         startPlayer();
       }
@@ -314,7 +335,7 @@
       if (!player.started && chunks.some((c) => c.status === "done")) startPlayer();
       show(`⚠️ ${doneN}/${chunks.length} 段完成，${badN} 段失败——点「重新配音」重试失败段`, 15000);
       btn.textContent = "🎙 重新配音";
-      btn.style.display = "block";
+      updateBtnVis();
       return;
     }
     if (st.status === "running") {
@@ -349,7 +370,7 @@
 
   function startPlayer() {
     const video = biggestVideo();
-    if (!video) { show("页面上没找到 <video>", 6000, true); btn.style.display = "block"; return; }
+    if (!video) { show("页面上没找到 <video>", 6000, true); updateBtnVis(); return; }
     player.started = true;
     player.video = video;
     player.mode = "dub";
@@ -357,7 +378,7 @@
     bind(video);
     show("🔊 AI 配音播放中（分段流式；未完成段自动回退原声）");
     btn.textContent = "🎙 重新配音";
-    btn.style.display = "block";
+    updateBtnVis();
     tgl.style.display = "block";
     syncNow(true);
     ensurePlaying();

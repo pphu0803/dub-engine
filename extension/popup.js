@@ -62,8 +62,8 @@
     }
   }
 
-  // 默认语言与状态灯开关：chrome.storage 为准（content.js 优先读它），localStorage 兜底
-  const langSel = $("lang"), hud = $("hud");
+  // 默认语言与两个开关：chrome.storage 为准（content.js 优先读它），localStorage 兜底
+  const langSel = $("lang"), hud = $("hud"), siteBtn = $("siteBtn");
   try {
     chrome.storage.local.get({ dub_lang: null, dub_hud: true }, (r) => {
       if (r.dub_lang) langSel.value = r.dub_lang;
@@ -75,6 +75,52 @@
   };
   hud.onchange = () => {
     try { chrome.storage.local.set({ dub_hud: hud.checked }); } catch (_) {}
+  };
+
+  // 此站显示配音按钮：按站点记忆（origin 粒度）。activeTab 权限在点开面板时
+  // 临时可读当前标签 url；非网页（chrome:// 等）隐藏该开关
+  let tabOrigin = null, tabId = null;
+  try {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const t = tabs && tabs[0];
+      if (!t || !t.url) { siteBtn.closest(".switch").style.display = "none"; return; }
+      let u;
+      try { u = new URL(t.url); } catch (_) { siteBtn.closest(".switch").style.display = "none"; return; }
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        siteBtn.closest(".switch").style.display = "none";
+        return;
+      }
+      tabId = t.id;
+      tabOrigin = u.origin;
+      chrome.storage.local.get({ dub_btn_sites: [] }, (r) => {
+        siteBtn.checked = (r.dub_btn_sites || []).includes(tabOrigin);
+      });
+    });
+  } catch (_) {}
+  siteBtn.onchange = () => {
+    if (!tabOrigin) return;
+    chrome.storage.local.get({ dub_btn_sites: [] }, (r) => {
+      const arr = new Set(r.dub_btn_sites || []);
+      if (siteBtn.checked) arr.add(tabOrigin);
+      else arr.delete(tabOrigin);
+      chrome.storage.local.set({ dub_btn_sites: Array.from(arr) });
+    });
+  };
+
+  // 配音此页：发消息给 content script 开配（按钮藏着他也能配）
+  $("dubNow").onclick = () => {
+    if (tabId == null) { $("jobLine").textContent = "此页不支持（非普通网页）"; return; }
+    try {
+      chrome.tabs.sendMessage(tabId, { cmd: "dub" }, () => {
+        if (chrome.runtime.lastError) {
+          $("jobLine").textContent = "此页不支持（插件未注入，刷新页面试试）";
+          return;
+        }
+        window.close();
+      });
+    } catch (_) {
+      $("jobLine").textContent = "此页不支持";
+    }
   };
 
   $("open").onclick = () => {

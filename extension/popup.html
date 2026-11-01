@@ -51,14 +51,20 @@
     </select>
   </div>
   <div class="switch row" style="margin-top:9px">
+    <span>此站显示配音按钮</span>
+    <input type="checkbox" id="siteBtn">
+  </div>
+  <div class="hint">开启后本站常驻「AI 配音/语言」页内按钮；默认所有网页都不显示</div>
+  <div class="switch row" style="margin-top:9px">
     <span>页面状态灯</span>
     <input type="checkbox" id="hud">
   </div>
-  <div class="hint">视频页右上角的引擎进度提示；关闭后不再显示（错误仍会提示）</div>
+  <div class="hint">配音进度提示胶囊；关闭后进度只进控制台（错误仍会提示）</div>
 </section>
 <footer>
-  <button id="open" class="primary">⚙ 管理页</button>
-  <button id="refresh" style="flex:0 0 56px">↻ 刷新</button>
+  <button id="dubNow" class="primary">🎬 配音此页</button>
+  <button id="open">⚙ 管理页</button>
+  <button id="refresh" style="flex:0 0 44px">↻</button>
 </footer>
 <script src="popup.js"></script>
 </body>

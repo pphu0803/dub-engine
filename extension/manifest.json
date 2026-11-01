@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "dub-engine",
   "description": "网页视频 AI 配音——本地引擎 + 一键换语言",
-  "version": "0.3.0",
-  "permissions": ["storage"],
+  "version": "0.3.1",
+  "permissions": ["storage", "activeTab"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "action": {
     "default_title": "dub 引擎控制台",
