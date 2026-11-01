@@ -192,21 +192,22 @@
     btn.style.display = "none";
     show("读页面记录…");
     const c = pick();
-    if (!c) {
-      fail("没找到像音轨的请求——重新打开视频页、播放 2 秒再试");
-      return;
+    let body;
+    if (c) {
+      console.log("[dub] 音轨:", c.url, "score", c.s);
+      body = { url: c.url, referer: location.href, lang };
+    } else {
+      // 抓不到直链（播放器变种/防 sniff）：退 page_url 模式，引擎用 yt-dlp 直取
+      show("⏳ 页内没抓到音轨，改用引擎 yt-dlp 直取…");
+      body = { page_url: location.href, referer: location.href, lang };
     }
-    console.log("[dub] 音轨:", c.url, "score", c.s);
-    show("⏳ 提交引擎…");
     let job;
     try {
       const r = await xfetch(SERVER + "/api/dub", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: c.url, referer: location.href, lang,
-        }),
-      });
+        body: JSON.stringify(body),
+      }, 60000); // page_url 模式服务端要先落音频文件再返回
       job = await r.json();
     } catch (e) {
       fail("连不上本地引擎（python -m dub serve）：" + e.message);
@@ -318,7 +319,8 @@
     }
     if (st.status === "running") {
       if (!chunks.length) {
-        show(`⏳ ${st.stage === "extract" ? "抽取整轨" : st.stage || "处理中"}…`);
+        const STAGE_CN = { download: "yt-dlp 取音频", extract: "抽取整轨" };
+        show(`⏳ ${STAGE_CN[st.stage] || st.stage || "处理中"}…`);
       } else {
         show(`⏳ 配音中 ${doneN}/${chunks.length} 段`);
         if (player.started) syncNow(); // 新段就绪后，若正停在未完成段上则切回配音

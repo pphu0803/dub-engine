@@ -505,6 +505,11 @@ def translate(segments: list[Segment], backend: str = "stub", target: str = "zh"
                 print(f"    [translate] LLM 重试 {attempt + 1}/4（{type(exc).__name__}，{wait}s 后）", flush=True)
                 time.sleep(wait)
         out = _parse_lines(text)
+        missing = [j for j in range(1, len(batch) + 1) if not out.get(j)]
+        if missing:
+            # 解析缺失会静默回落原文（成品里混进源语言），必须吵出来
+            print(f"    [translate] {len(missing)}/{len(batch)} 句解析缺失，回落原文；"
+                  f"原始返回前 200 字: {text[:200]!r}", flush=True)
         for j, s in enumerate(batch, 1):
             s.translated = out.get(j, "") or s.text
 
@@ -523,6 +528,14 @@ def _parse_lines(text: str) -> dict[int, str]:
         return {int(x["i"]): str(x.get("t", "")).strip() for x in data.get("lines", [])}
     except Exception:
         pass
+    # 前后带说明文字的 JSON：抓第一个 {...} 再试
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            return {int(x["i"]): str(x.get("t", "")).strip() for x in data.get("lines", [])}
+        except Exception:
+            pass
     # 退化：按 "1. xxx" 抓
     out = {}
     for m in re.finditer(r"^\s*(\d+)[.、)]\s*(.+)$", text, re.M):

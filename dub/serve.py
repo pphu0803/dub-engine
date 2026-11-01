@@ -1,6 +1,8 @@
 """dub serve — 本地 HTTP 服务，浏览器插件的后端。只绑 127.0.0.1。
 
   POST /api/dub           {"url": "...", "referer": "..."} 或 {"path": "本地文件"}
+                          或 {"page_url": "视频页URL", "cookies": "chrome|edge|firefox"(可选)}
+                          —— page_url 模式走 yt-dlp 取音频，插件抓不到直链的兜底
   GET  /api/job/<id>            {status, stage, chunks[], duration, error}
   GET  /api/job/<id>/audio/<k>  第 k 段 mp3（该段 done 即可取）
   GET  /api/job/<id>/audio      整轨 mp3（全部完成后）
@@ -367,6 +369,59 @@ def _download(url: str, referer: str, dst: str) -> int:
     return n
 
 
+def _start_page_job(payload: dict, page_url: str, workdir: str) -> dict:
+    """page_url 模式：yt-dlp 下载是分钟级，不能堵在 POST 里——先建任务立即
+    返回，下载在任务线程里做；下载完换内容身份键，之后续跑/秒回与直链模式同源。"""
+    import hashlib
+
+    lang = payload.get("lang", "zh")
+    tts_backend = payload.get("tts_backend") or TTS_DEFAULT
+    key = (f"page_{hashlib.sha256(page_url.encode()).hexdigest()[:16]}"
+           f"_{lang}_{tts_backend}_{streaming.PIPELINE_VER}")
+    if key in JOBS_BY_KEY:
+        job = JOBS[JOBS_BY_KEY[key]]
+        if job["status"] == "done":
+            return {"job_id": job["id"], "status": "done", "cached": True,
+                    "chunks_done": job.get("chunks_done", 0)}
+        if job["status"] in ("error", "partial"):
+            job["status"] = "running"
+            threading.Thread(target=job["run"], daemon=True).start()
+            return {"job_id": job["id"], "status": "running", "cached": False,
+                    "chunks_done": job.get("chunks_done", 0)}
+        return {"job_id": job["id"], "status": job["status"], "cached": False,
+                "chunks_done": job.get("chunks_done", 0)}
+
+    jid = uuid.uuid4().hex[:8]
+    job = {
+        "id": jid, "key": key, "status": "running", "stage": "download",
+        "chunks": [], "chunks_done": 0, "src": "", "lang": lang,
+        "source_lang": payload.get("source_lang", ""),
+        "tts_backend": tts_backend, "meta": {"page": page_url, "url": ""},
+    }
+    JOBS[jid] = job
+    JOBS_BY_KEY[key] = jid
+
+    def run() -> None:
+        with _ACTIVE:
+            try:
+                src = _fetch_page_audio(page_url, workdir, payload.get("cookies", ""))
+                job["src"] = src
+                ck = os.path.splitext(os.path.basename(src))[0]
+                job["key"] = f"{ck}_{lang}_{tts_backend}_{streaming.PIPELINE_VER}"
+                JOBS_BY_KEY[job["key"]] = jid
+                streaming.run_job(job, src, lang, job["source_lang"], tts_backend,
+                                  workdir, api_base=LLM_CFG["base"],
+                                  api_key=LLM_CFG["key"], llm_model=LLM_CFG["model"],
+                                  mimo_base=MIMO_CFG["base"], mimo_key=MIMO_CFG["key"])
+            except Exception as exc:
+                job["status"] = "error"
+                job["error"] = f"{type(exc).__name__}: {exc}"
+
+    job["run"] = run
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": jid, "status": "running", "cached": False, "chunks_done": 0}
+
+
 def _content_key(fp: str) -> str:
     import hashlib
 
@@ -412,7 +467,59 @@ def _fetch_audio(url: str, referer: str, workdir: str) -> str:
     return final
 
 
+def _fetch_page_audio(page_url: str, workdir: str, cookies: str = "") -> str:
+    """page_url 模式：yt-dlp 直接从视频页取音频（Phase 2.C）。插件抓不到
+    直链的兜底；带 cookies 可下 VIP 正片。产物照旧按内容哈希落盘。"""
+    import subprocess
+    import sys
+
+    dldir = os.path.join(workdir, "dl")
+    os.makedirs(dldir, exist_ok=True)
+    idx_path = os.path.join(dldir, "dl_index.json")
+    try:
+        idx = json.load(open(idx_path, encoding="utf-8"))
+    except Exception:
+        idx = {}
+    cache_key = f"page:{page_url}"
+    if idx.get(cache_key) and os.path.exists(idx[cache_key]):
+        print(f"[serve] 页面音频命中缓存: {idx[cache_key]}")
+        return idx[cache_key]
+
+    prefix = f"ytdlp_{uuid.uuid4().hex[:8]}."
+    cmd = [sys.executable, "-m", "yt_dlp", "-f", "bestaudio/best", "--no-playlist",
+           "--no-warnings", "--retries", "3", "--socket-timeout", "30",
+           "-o", os.path.join(dldir, prefix + "%(ext)s")]
+    if cookies:
+        cmd += ["--cookies-from-browser", cookies]
+    cmd.append(page_url)
+    print(f"[serve] yt-dlp 取音频: {page_url}" + (f" (cookies={cookies})" if cookies else ""), flush=True)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"yt-dlp 超时（10 分钟）：{page_url}") from exc
+    if p.returncode != 0:
+        raise ValueError(f"yt-dlp 失败: {(p.stderr or p.stdout or '').strip()[-400:]}")
+    made = [f for f in os.listdir(dldir) if f.startswith(prefix) and not f.endswith(".part")]
+    if not made:
+        raise ValueError("yt-dlp 未产出音频文件")
+    tmp = os.path.join(dldir, made[0])
+    ck = _content_key(tmp)
+    final = os.path.join(dldir, f"{ck}{os.path.splitext(tmp)[1]}")
+    if os.path.exists(final):
+        os.remove(tmp)
+    else:
+        os.replace(tmp, final)
+    idx[cache_key] = final
+    json.dump(idx, open(idx_path, "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"[serve] 页面音频 -> {final}")
+    return final
+
+
 def start_job(payload: dict, workdir: str) -> dict:
+    page_url = payload.get("page_url", "")
+    if page_url and "url" not in payload and "path" not in payload:
+        return _start_page_job(payload, page_url, workdir)
     if "path" in payload:
         src = os.path.abspath(payload["path"])
         if not os.path.exists(src):
@@ -420,7 +527,7 @@ def start_job(payload: dict, workdir: str) -> dict:
     else:
         url = payload.get("url", "")
         if not url:
-            raise ValueError("需要 url 或 path")
+            raise ValueError("需要 url、path 或 page_url")
         src = _fetch_audio(url, payload.get("referer", ""), workdir)
 
     lang = payload.get("lang", "zh")
