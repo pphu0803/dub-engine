@@ -9,8 +9,8 @@ jobs:
   engine-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # Heavy deps (torch/demucs/whisper) are lazy-imported by the engine;
@@ -21,23 +21,13 @@ jobs:
   extension:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
       - name: Syntax-check extension scripts
         run: for f in extension/*.js; do node --check "$f"; done
       - name: Validate manifest.json
         run: node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json','utf8')); console.log('manifest ok')"
       - name: i18n zh/en key parity
-        run: |
-          node -e "
-          global.chrome={storage:{local:{get:(_,cb)=>cb({})},onChanged:{addListener(){}}}};
-          global.navigator={language:'zh'};
-          global.document={querySelectorAll:()=>[]};
-          const src=require('fs').readFileSync('extension/i18n.js','utf8');
-          eval(src.replace(/^\/\*\*[\s\S]*?\*\//,''));
-          const zh=Object.keys(DubI18n.dict.zh), en=Object.keys(DubI18n.dict.en);
-          const miss=zh.filter(k=>!(k in DubI18n.dict.en)).concat(en.filter(k=>!(k in DubI18n.dict.zh)));
-          if(miss.length){console.error('missing keys:',miss);process.exit(1);}
-          console.log('i18n parity ok:',zh.length,'keys');"
+        run: node tests/check_i18n.js

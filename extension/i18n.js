@@ -312,3 +312,6 @@ const DubI18n = {
     }
   },
 };
+
+// Node 环境导出（CI 的 zh/en 键位对齐闸门用；浏览器里 module 未定义，无副作用）
+if (typeof module !== "undefined") module.exports = DubI18n;
