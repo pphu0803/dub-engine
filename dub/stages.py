@@ -619,24 +619,28 @@ EDGE_VOICE_BY_PROFILE = {
 }
 
 
-# MiMo 音色（小米云端，24kHz WAV，见 dub/mimo.py）。性别映射是保守猜测，
-# 待耳朵校准后改这张表；ja/ko 未测，先落 mimo_default。
+# MiMo 音色（小米云端，24kHz WAV，见 dub/mimo.py）。值 = [(声线, 升降半音)] 池，
+# 同画像多声线按说话人编号轮转——两个同画像角色不再塌成同一声线。
+# 半音为负 = 降 key（男声低沉显沧桑）；升降只改音高，时长不变，后续贴合不受影响。
+# 2026-11-01 用户耳朵标注：zh 苏打/白桦=年轻男、冰糖=年轻女、茉莉=女沉稳(mature)、
+# mimo_default=女(AI 感强，只做兜底)；en Mia/Chloe=年轻女、Milo=年轻男、Dean=成熟男。
+# zh 没有成熟男声线 → 苏打/白桦降 key 代偿，降几档等耳朵选（.tmp/mimo_pitch_test/）。
 MIMO_VOICE_BY_PROFILE = {
     "zh": {
-        ("m", "child"): "苏打",
-        ("m", "young"): "苏打",
-        ("m", "mature"): "白桦",
-        ("f", "child"): "茉莉",
-        ("f", "young"): "茉莉",
-        ("f", "mature"): "茉莉",
+        ("m", "child"): [("苏打", 0.0), ("白桦", 0.0)],
+        ("m", "young"): [("苏打", 0.0), ("白桦", 0.0)],
+        ("m", "mature"): [("苏打", -3.0), ("白桦", -3.0)],
+        ("f", "child"): [("冰糖", 0.0)],
+        ("f", "young"): [("冰糖", 0.0)],
+        ("f", "mature"): [("茉莉", 0.0)],
     },
     "en": {
-        ("m", "child"): "Milo",
-        ("m", "young"): "Milo",
-        ("m", "mature"): "Dean",
-        ("f", "child"): "Mia",
-        ("f", "young"): "Mia",
-        ("f", "mature"): "Mia",
+        ("m", "child"): [("Milo", 0.0)],
+        ("m", "young"): [("Milo", 0.0)],
+        ("m", "mature"): [("Dean", 0.0)],
+        ("f", "child"): [("Chloe", 0.0)],
+        ("f", "young"): [("Mia", 0.0), ("Chloe", 0.0)],
+        ("f", "mature"): [("Mia", 0.0), ("Chloe", 0.0)],
     },
 }
 
@@ -673,20 +677,22 @@ def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str
             raise ValueError("backend=mimo 需要 MiMo key（--mimo-key / DUB_MIMO_KEY / config.json mimo 段）")
         by_mimo = MIMO_VOICE_BY_PROFILE.get(lang, {})
 
-        def mimo_voice_of(s: Segment) -> str:
+        def mimo_voice_of(s: Segment) -> tuple[str, float]:
             if voice:
-                return voice
+                return (voice, 0.0)
             if profiles and s.speaker in profiles:
                 p = profiles[s.speaker]
-                return by_mimo.get((p["gender"], p["age"]), "mimo_default")
-            return "mimo_default"
+                # 池内按说话人编号轮转（跨段编号稳定）；gender="x" 无条目落 mimo_default
+                pool_ = by_mimo.get((p["gender"], p["age"])) or [("mimo_default", 0.0)]
+                return pool_[s.speaker % len(pool_)]
+            return ("mimo_default", 0.0)
 
         jobs = [(s.translated or s.text,
-                 os.path.join(out_dir, f"seg_{i:04d}.wav"), mimo_voice_of(s))
+                 os.path.join(out_dir, f"seg_{i:04d}.wav"), *mimo_voice_of(s))
                 for i, s in enumerate(segments)]
         _tts_mimo_batch(jobs, mimo_cfg)
-        for (_, dst, _), s in zip(jobs, segments):
-            s.tts_path = dst
+        for job, s in zip(jobs, segments):
+            s.tts_path = job[1]
         return stats
 
     for i, s in enumerate(segments):
@@ -737,16 +743,21 @@ def _tts_edge_batch(jobs: list[tuple[str, str, str]]) -> None:
     asyncio.run(run())
 
 
-def _tts_mimo_batch(jobs: list[tuple[str, str, str]], cfg: dict) -> None:
-    """并发合成 [(text, dst, voice)] 走小米 MiMo 云端。HTTP 接口偶发超时，逐段重试三次。"""
+def _tts_mimo_batch(jobs: list[tuple], cfg: dict) -> None:
+    """并发合成 [(text, dst, voice, semitones)] 走小米 MiMo 云端。HTTP 接口偶发
+    超时，逐段重试三次；semitones 非 0 合成后升降 key（男声沧桑档，
+    见 MIMO_VOICE_BY_PROFILE），变调不变速、不影响后续时长贴合。"""
     from concurrent.futures import ThreadPoolExecutor
 
     from . import mimo
 
-    def one(text: str, dst: str, voice: str) -> None:
+    def one(text: str, dst: str, voice: str, semitones: float = 0.0) -> None:
         for attempt in range(3):
             try:
                 mimo.tts_one(cfg.get("base") or mimo.DEFAULT_BASE, cfg["key"], text, voice, dst)
+                if semitones:
+                    data, sr = audio.load(dst)
+                    audio.save(dst, audio.pitch_shift(data, sr, semitones), sr)
                 return
             except Exception as exc:
                 if attempt == 2:

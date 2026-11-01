@@ -66,6 +66,18 @@ def time_stretch(data: np.ndarray, sr: int, rate: float) -> np.ndarray:
         return data[idx]
 
 
+def pitch_shift(data: np.ndarray, sr: int, semitones: float) -> np.ndarray:
+    """变调不变速。semitones>0 升 key；负值降 key（男声低沉显沧桑）。"""
+    if abs(semitones) < 0.01:
+        return data
+    import librosa
+
+    chans = [librosa.effects.pitch_shift(data[:, c], sr=sr, n_steps=semitones)
+             for c in range(data.shape[1])]
+    n = min(len(c) for c in chans)
+    return np.stack([c[:n] for c in chans], axis=1).astype(np.float32)
+
+
 def db_to_gain(db: float) -> float:
     return float(10 ** (db / 20.0))
 
