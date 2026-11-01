@@ -35,7 +35,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from . import streaming
+from . import streaming, tts_providers
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -48,6 +48,9 @@ _ACTIVE = threading.Lock()  # 同一时间只允许一个 job 占 GPU
 LLM_CFG = {"base": "", "key": "", "model": ""}
 MIMO_CFG = {"base": "", "key": ""}
 TTS_DEFAULT = "edge"
+# TTS provider 层：config.json tts 段（providers/voice_maps 用户层），实例缓存热重建
+TTS_CFG: dict = {"providers": {}, "voice_maps": {}}
+_PROVIDERS: dict = {}
 
 WORKDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STREAM_DIR = os.path.join(WORKDIR, "work", "stream")
@@ -96,6 +99,49 @@ def _load_tts_default(cli_val: str) -> str:
     return (cli_val or os.environ.get("DUB_TTS_BACKEND", "") or val or "edge").strip()
 
 
+# ---------------------------------------------------------------- TTS provider 配置
+
+def _load_tts_config() -> None:
+    """读 config.json tts 段；旧 mimo 段自动迁移为 providers.mimo（新式配置优先）。"""
+    global TTS_CFG
+    try:
+        raw = json.load(open(CFG_PATH, encoding="utf-8"))
+    except Exception:
+        raw = {}
+    tts = raw.get("tts") or {}
+    providers = dict(tts.get("providers") or {})
+    legacy = raw.get("mimo") or {}
+    if "mimo" not in providers and (legacy.get("key") or legacy.get("base")):
+        providers["mimo"] = {"type": "mimo", "base": legacy.get("base", ""),
+                             "key": legacy.get("key", "")}
+    TTS_CFG = {"providers": providers, "voice_maps": dict(tts.get("voice_maps") or {})}
+
+
+def _rebuild_providers() -> None:
+    global _PROVIDERS
+    _PROVIDERS = {}
+    for name, pcfg in (TTS_CFG["providers"] or {}).items():
+        try:
+            _PROVIDERS[name] = tts_providers.build_provider(str(pcfg.get("type", "")), pcfg)
+        except Exception as exc:
+            print(f"[serve] TTS provider {name} 构建失败: {exc}", flush=True)
+
+
+def _get_provider(name: str):
+    """已配置的 provider 实例；内置类型允许空配置（cosyvoice 走环境变量）。"""
+    if name in _PROVIDERS:
+        return _PROVIDERS[name]
+    if name in tts_providers.PROVIDER_TYPES:
+        return tts_providers.build_provider(name, {})
+    raise ValueError(
+        f"TTS provider '{name}' 未配置（config.json tts.providers，内置: "
+        f"{', '.join(tts_providers.BUILTIN_PROVIDERS)}）")
+
+
+def _effective_voice_maps(name: str) -> dict:
+    return tts_providers.merge_voice_maps(name, TTS_CFG["voice_maps"])
+
+
 # ---------------------------------------------------------------- 配置读写/测活
 
 def _masked(sec: dict) -> dict:
@@ -105,8 +151,19 @@ def _masked(sec: dict) -> dict:
 
 
 def _config_view() -> dict:
+    provs = {}
+    for name, pcfg in (TTS_CFG["providers"] or {}).items():
+        key = str(pcfg.get("key", "") or "")
+        e = {"type": pcfg.get("type", ""), "key_set": bool(key),
+             "key_tail": key[-4:] if key else ""}
+        for k in ("base", "model", "root", "ref_wav"):
+            if pcfg.get(k):
+                e[k] = pcfg[k]
+        provs[name] = e
     return {"tts_backend": TTS_DEFAULT, "pipeline_ver": streaming.PIPELINE_VER,
-            "llm": _masked(LLM_CFG), "mimo": _masked(MIMO_CFG)}
+            "llm": _masked(LLM_CFG), "mimo": _masked(MIMO_CFG),
+            "tts": {"backend": TTS_DEFAULT, "providers": provs,
+                    "voice_maps": TTS_CFG["voice_maps"] or {}}}
 
 
 def _update_config(body: dict) -> None:
@@ -131,14 +188,40 @@ def _update_config(body: dict) -> None:
 
         merge("llm", ("base", "key", "model"), body.get("llm") or {})
         merge("mimo", ("base", "key"), body.get("mimo") or {})
-        if body.get("tts_backend") in ("edge", "mimo"):
-            cfg["tts_backend"] = body["tts_backend"]
+        tb = body.get("tts_backend")
+        if isinstance(tb, str) and tb.strip():
+            tb = tb.strip()
+            known = (set(tts_providers.BUILTIN_PROVIDERS)
+                     | set((cfg.get("tts") or {}).get("providers") or {}))
+            if tb not in known:
+                raise ValueError(f"未知 TTS provider: {tb}（内置或先在 tts.providers 配置）")
+            cfg["tts_backend"] = tb
+        # 新式 tts 段：providers 按名覆盖（字段 ""=保留/null=清除），voice_maps 整层替换
+        tts_up = body.get("tts") or {}
+        if isinstance(tts_up.get("providers"), dict) and tts_up["providers"]:
+            sec = cfg.setdefault("tts", {}).setdefault("providers", {})
+            for name, pcfg in tts_up["providers"].items():
+                if not isinstance(pcfg, dict):
+                    continue
+                cur = sec.setdefault(str(name), {})
+                for k, v in pcfg.items():
+                    if k == "type":
+                        if v in tts_providers.PROVIDER_TYPES:
+                            cur["type"] = v
+                    elif v is None:
+                        cur.pop(k, None)
+                    elif isinstance(v, str) and v.strip():
+                        cur[k] = v.strip()
+        if isinstance(tts_up.get("voice_maps"), dict):
+            cfg.setdefault("tts", {})["voice_maps"] = tts_up["voice_maps"]
         json.dump(cfg, open(CFG_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     # 写盘成功后再热生效（_load_* 的优先级与启动时一致：环境变量 > config.json）
     global LLM_CFG, MIMO_CFG, TTS_DEFAULT
     LLM_CFG = _load_llm_config({})
     MIMO_CFG = _load_mimo_config({})
     TTS_DEFAULT = _load_tts_default("")
+    _load_tts_config()
+    _rebuild_providers()
 
 
 def _test_llm(base: str, key: str, model: str) -> dict:
@@ -412,7 +495,9 @@ def _start_page_job(payload: dict, page_url: str, workdir: str) -> dict:
                 streaming.run_job(job, src, lang, job["source_lang"], tts_backend,
                                   workdir, api_base=LLM_CFG["base"],
                                   api_key=LLM_CFG["key"], llm_model=LLM_CFG["model"],
-                                  mimo_base=MIMO_CFG["base"], mimo_key=MIMO_CFG["key"])
+                                  tts_provider=_get_provider(tts_backend),
+                                  voice_maps=_effective_voice_maps(tts_backend),
+                                  tts_voice=str(payload.get("tts_voice", "") or ""))
             except Exception as exc:
                 job["status"] = "error"
                 job["error"] = f"{type(exc).__name__}: {exc}"
@@ -570,8 +655,9 @@ def start_job(payload: dict, workdir: str) -> dict:
                     api_base=LLM_CFG["base"],
                     api_key=LLM_CFG["key"],
                     llm_model=LLM_CFG["model"],
-                    mimo_base=MIMO_CFG["base"],
-                    mimo_key=MIMO_CFG["key"],
+                    tts_provider=_get_provider(tts_backend),
+                    voice_maps=_effective_voice_maps(tts_backend),
+                    tts_voice=str(payload.get("tts_voice", "") or ""),
                 )
             except Exception as exc:
                 job["status"] = "error"
@@ -655,6 +741,18 @@ class Handler(BaseHTTPRequestHandler):
                 o = body.get("mimo") or {}
                 self._json(_test_mimo(o.get("base") or MIMO_CFG["base"],
                                       o.get("key") or MIMO_CFG["key"]))
+            elif body.get("target") == "tts":
+                name = str(body.get("provider") or TTS_DEFAULT)
+                try:
+                    prov = _get_provider(name)
+                except ValueError as exc:
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                if not body.get("voice"):
+                    lang = str(body.get("lang") or "zh")
+                    lm = _effective_voice_maps(name).get(lang) or {}
+                    body["voice"] = (lm.get("*") or [prov.fallback_voice(lang)])[0][0]
+                self._json(prov.test(str(body["voice"]), str(body.get("text") or "")))
             else:
                 self._json({"error": "target 须为 llm 或 mimo"}, 400)
             return
@@ -774,6 +872,17 @@ def serve(port: int = 8765, llm_base: str = "", llm_key: str = "", llm_model: st
         print(f"[serve] MiMo TTS: {MIMO_CFG['base'] or '(默认端点)'}")
     TTS_DEFAULT = _load_tts_default(tts_backend)
     print(f"[serve] 默认 TTS: {TTS_DEFAULT}")
+    _load_tts_config()
+    # mimo 旧三通道（CLI/env/config mimo 段）兜底：仅当新式 tts.providers.mimo 缺 key 时填充
+    p = TTS_CFG["providers"].get("mimo")
+    if not (p and p.get("key")) and MIMO_CFG["key"]:
+        p = TTS_CFG["providers"].setdefault("mimo", {"type": "mimo"})
+        p.setdefault("key", MIMO_CFG["key"])
+        if MIMO_CFG["base"]:
+            p.setdefault("base", MIMO_CFG["base"])
+    _rebuild_providers()
+    if _PROVIDERS:
+        print(f"[serve] TTS providers: {', '.join(sorted(_PROVIDERS))}")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"[serve] http://127.0.0.1:{port}  (Ctrl+C 退出；配置可在插件管理页改，热生效)")
     httpd.serve_forever()

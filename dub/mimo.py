@@ -24,10 +24,11 @@ class MimoError(Exception):
     pass
 
 
-def tts_one(base: str, key: str, text: str, voice: str, dst: str, timeout: int = TIMEOUT) -> None:
+def tts_one(base: str, key: str, text: str, voice: str, dst: str, timeout: int = TIMEOUT,
+            model: str = TTS_MODEL) -> None:
     """单句合成 → WAV 文件。抛 MimoError/URLError 由调用方重试。"""
     payload = {
-        "model": TTS_MODEL,
+        "model": model,
         "messages": [{"role": "assistant", "content": text}],
         "audio": {"format": "wav", "voice": voice},
     }

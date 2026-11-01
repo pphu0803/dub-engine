@@ -37,7 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--llm-model", default="")
     r.add_argument("--api-base", default="")
     r.add_argument("--api-key", default="")
-    r.add_argument("--tts", dest="tts_backend", default="stub", choices=["stub", "edge", "cosyvoice"])
+    r.add_argument("--tts", dest="tts_backend", default="stub",
+                help="TTS provider 类型或 config 里配好的 provider 名（stub/edge/mimo/openai/cosyvoice…）")
     r.add_argument("--voice", default="", help="edge 音色名，如 zh-CN-XiaoxiaoNeural")
     r.add_argument("--ref-wav", default="", help="CosyVoice 的音色参考音频")
     r.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])

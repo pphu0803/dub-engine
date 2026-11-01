@@ -20,8 +20,9 @@
   .kv b { color: #9a9aa6; font-weight: 500; flex: none; }
   field { display: block; margin: 10px 0; }
   field label { display: block; font-size: 12px; color: #9a9aa6; margin-bottom: 3px; }
-  input, select { width: 100%; background: #22222b; color: #e8e8ee; border: 1px solid #33333f; border-radius: 8px; padding: 7px 10px; font-size: 13px; }
-  input:focus, select:focus { outline: none; border-color: #3bb2b8; }
+  input, select, textarea { width: 100%; background: #22222b; color: #e8e8ee; border: 1px solid #33333f; border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+  textarea { font: 12px/1.5 ui-monospace, monospace; resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #3bb2b8; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
   .acts { display: flex; gap: 8px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
@@ -90,19 +91,47 @@
 
   <div class="card">
     <h2>配音 TTS</h2>
-    <field><label>默认后端（新任务生效）</label>
-      <select id="ttsBackend"><option value="edge">edge（微软在线，免 key）</option><option value="mimo">mimo（小米云端）</option></select>
-    </field>
     <div class="two">
-      <field><label>MiMo 端点 base</label><input id="mimoBase" placeholder="https://api.xiaomimimo.com/v1" autocomplete="off"></field>
-      <field><label>MiMo key</label><input id="mimoKey" type="password" placeholder="" autocomplete="off"></field>
+      <field><label>默认后端（provider，新任务生效）</label><select id="ttsBackend"></select></field>
+      <field><label>编辑 provider</label><select id="provSel"></select></field>
     </div>
+    <div class="three">
+      <field><label>type</label>
+        <select id="provType">
+          <option value="edge">edge（微软在线，免 key）</option>
+          <option value="openai">openai（OpenAI 兼容 /audio/speech）</option>
+          <option value="mimo">mimo（小米云端）</option>
+          <option value="cosyvoice">cosyvoice（本地克隆）</option>
+          <option value="stub">stub（测试占位）</option>
+        </select>
+      </field>
+      <field><label>base</label><input id="provBase" placeholder="https://api.openai.com/v1" autocomplete="off"></field>
+      <field><label>model</label><input id="provModel" autocomplete="off"></field>
+    </div>
+    <div class="three">
+      <field><label>key</label><input id="provKey" type="password" autocomplete="off"></field>
+      <field><label>root（cosyvoice 仓库路径）</label><input id="provRoot" autocomplete="off"></field>
+      <field><label>ref_wav（cosyvoice 参考音频）</label><input id="provRef" autocomplete="off"></field>
+    </div>
+    <div class="two">
+      <field><label>新建 provider 名（选「＋ 新建」时生效）</label><input id="provNewName" placeholder="如 siliconflow" autocomplete="off" style="display:none"></field>
+      <field><label>试听声线（留空=该后端默认）</label><input id="provTestVoice" autocomplete="off"></field>
+    </div>
+    <div class="hint">edge/stub 免配置。openai 兼容类型覆盖 OpenAI/硅基流动/各类聚合站。字段留空 = 保留现值。</div>
     <div class="acts">
-      <button id="ttsSave" class="primary">保存</button>
-      <button id="mimoTest">测试 MiMo</button>
-      <button id="mimoClear">清除 MiMo key</button>
+      <button id="ttsSave" class="primary">保存 provider</button>
+      <button id="ttsSetDefault">设为默认后端</button>
+      <button id="ttsTest">测试试听</button>
+      <button id="provClearKey">清除 key</button>
       <span class="msg" id="ttsMsg"></span>
     </div>
+    <audio id="ttsAudio" controls style="display:none;width:100%;margin-top:8px"></audio>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;color:#9a9aa6;font-size:12.5px">声线映射 voice_maps（高级，JSON；同键覆盖内置表）</summary>
+      <field><textarea id="vmJson" rows="10" spellcheck="false"></textarea></field>
+      <div class="acts"><button id="vmSave">保存声线映射</button><span class="msg" id="vmMsg"></span></div>
+      <div class="hint">结构：{"provider": {"lang": {"m_young": [["声线", 半音], ...], "*": 兜底池}}}。半音负值=降 key；同池多声线按说话人轮转。{} = 全用内置表。</div>
+    </details>
   </div>
 
   <div class="card">

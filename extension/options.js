@@ -65,13 +65,40 @@
 
   // ----------------------------------------------------------------- 配置
 
+  let CFG = null; // 最近一次 GET /api/config 的 tts 段缓存
+  const BUILTIN_PROVS = ["edge", "stub", "cosyvoice", "mimo", "openai"];
+  const provName = () => {
+    const v = $("provSel").value;
+    return v === "__new" ? $("provNewName").value.trim() : v;
+  };
+
   function fillConfig(cfg) {
     $("llmBase").value = cfg.llm?.base || "";
     $("llmModel").value = cfg.llm?.model || "";
     $("llmKey").placeholder = cfg.llm?.key_set ? `已配置（尾号 ${cfg.llm.key_tail}）——留空不修改` : "未配置";
-    $("mimoBase").value = cfg.mimo?.base || "";
-    $("mimoKey").placeholder = cfg.mimo?.key_set ? `已配置（尾号 ${cfg.mimo.key_tail}）——留空不修改` : "未配置";
-    $("ttsBackend").value = cfg.tts_backend || "edge";
+    CFG = cfg.tts || { backend: "edge", providers: {}, voice_maps: {} };
+    const names = [...new Set([...BUILTIN_PROVS, ...Object.keys(CFG.providers || {})])];
+    $("ttsBackend").innerHTML = names.map((n) => `<option value="${n}">${n}</option>`).join("");
+    $("ttsBackend").value = CFG.backend || "edge";
+    $("provSel").innerHTML = '<option value="">— 选择 —</option>'
+      + names.map((n) => `<option value="${n}">${n}</option>`).join("")
+      + '<option value="__new">＋ 新建…</option>';
+    $("vmJson").value = JSON.stringify(CFG.voice_maps || {}, null, 2);
+    loadProvFields();
+  }
+
+  function loadProvFields() {
+    const name = $("provSel").value;
+    const isNew = name === "__new";
+    $("provNewName").style.display = isNew ? "block" : "none";
+    const p = (CFG && CFG.providers || {})[name] || {};
+    $("provType").value = p.type || (BUILTIN_PROVS.includes(name) ? name : "openai");
+    $("provBase").value = p.base || "";
+    $("provModel").value = p.model || "";
+    $("provKey").value = "";
+    $("provKey").placeholder = p.key_set ? `已配置（尾号 ${p.key_tail}）——留空不修改` : "未配置";
+    $("provRoot").value = p.root || "";
+    $("provRef").value = p.ref_wav || "";
   }
 
   async function loadConfig() {
@@ -124,17 +151,64 @@
   $("llmTest").onclick = () => testTarget("llm", {
     llm: { base: $("llmBase").value.trim(), model: $("llmModel").value.trim(), key: $("llmKey").value },
   }, $("llmMsg"));
-  $("ttsSave").onclick = () => saveConfig({
-    tts_backend: $("ttsBackend").value,
-    mimo: { base: $("mimoBase").value.trim(), key: $("mimoKey").value },
-  }, $("ttsMsg"));
-  $("mimoTest").onclick = () => testTarget("mimo", {
-    mimo: { base: $("mimoBase").value.trim(), key: $("mimoKey").value },
-  }, $("ttsMsg"));
-  $("mimoClear").onclick = () => {
-    if (!confirm("确定清除已保存的 MiMo key？")) return;
-    $("mimoKey").value = "";
-    saveConfig({ mimo: { key: null } }, $("ttsMsg"));
+
+  $("provSel").onchange = loadProvFields;
+  $("ttsSave").onclick = () => {
+    const name = provName();
+    if (!name) { $("ttsMsg").className = "msg err"; $("ttsMsg").textContent = "先在「编辑 provider」选择或新建"; return; }
+    const pc = { type: $("provType").value };
+    if ($("provBase").value.trim()) pc.base = $("provBase").value.trim();
+    if ($("provModel").value.trim()) pc.model = $("provModel").value.trim();
+    if ($("provKey").value) pc.key = $("provKey").value;
+    if ($("provRoot").value.trim()) pc.root = $("provRoot").value.trim();
+    if ($("provRef").value.trim()) pc.ref_wav = $("provRef").value.trim();
+    saveConfig({ tts: { providers: { [name]: pc } } }, $("ttsMsg"));
+  };
+  $("ttsSetDefault").onclick = () => {
+    const name = provName() || $("ttsBackend").value;
+    saveConfig({ tts_backend: name }, $("ttsMsg"));
+  };
+  $("ttsTest").onclick = async () => {
+    const name = provName() || $("ttsBackend").value;
+    const msgEl = $("ttsMsg");
+    msgEl.className = "msg";
+    msgEl.textContent = "合成中…（最长 60s）";
+    try {
+      const { data } = await api("/api/config/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: "tts", provider: name, voice: $("provTestVoice").value.trim() }),
+      }, 65000);
+      if (!data.ok) throw new Error(data.error || "失败");
+      msgEl.className = "msg ok";
+      msgEl.textContent = `✅ ${data.latency_ms}ms`;
+      const au = $("ttsAudio");
+      au.src = "data:audio/wav;base64," + data.audio_b64;
+      au.style.display = "block";
+      au.play().catch(() => {});
+    } catch (e) {
+      msgEl.className = "msg err";
+      msgEl.textContent = "❌ " + e.message;
+    }
+  };
+  $("provClearKey").onclick = () => {
+    const name = provName();
+    if (!name) return;
+    if (!confirm(`清除 provider「${name}」的 key？`)) return;
+    $("provKey").value = "";
+    saveConfig({ tts: { providers: { [name]: { key: null } } } }, $("ttsMsg"));
+  };
+  $("vmSave").onclick = () => {
+    const msgEl = $("vmMsg");
+    let obj;
+    try {
+      obj = JSON.parse($("vmJson").value || "{}");
+    } catch (e) {
+      msgEl.className = "msg err";
+      msgEl.textContent = "❌ JSON 解析失败: " + e.message;
+      return;
+    }
+    saveConfig({ tts: { voice_maps: obj } }, msgEl);
   };
 
   // ------------------------------------------------------------- 插件偏好

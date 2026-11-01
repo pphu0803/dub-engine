@@ -147,14 +147,40 @@ export DUB_LLM_MODEL="deepseek-chat"
 
 见下一节的 `--llm-*` 参数。
 
-## TTS 后端
+## TTS 后端（provider 可配置）
 
-| 后端 | 说明 | 配置 |
-|---|---|---|
-| `edge`（默认） | 微软 Edge 神经声线，覆盖中/英/日/韩 | 无需配置 |
-| `mimo` | 小米 MiMo 云端 TTS（24kHz WAV，中文听感更自然；声线：茉莉/苏打/白桦/Mia/Milo/Dean 等） | config.json `mimo` 段 / `DUB_MIMO_KEY` / `--mimo-key` |
+TTS 走 provider 抽象（`dub/tts_providers.py`）：内置 `edge` / `openai` / `mimo` / `cosyvoice` / `stub`，全部可被 config.json 的 `tts` 段替换或扩展。**接入新厂商两条路**：
 
-切换默认后端：config.json `"tts_backend": "mimo"`，或启动参数 `--tts-backend mimo`，或请求里带 `"tts_backend"`（优先级最高），或插件管理页「配音 TTS」下拉（同样热生效，页内可填 MiMo key 并一键测试）。说话人按性别/年龄映射声线，映射表在 `dub/stages.py` 的 `MIMO_VOICE_BY_PROFILE`（性别是保守猜测，可自行校准）；ja/ko 走 MiMo 未验证，建议保留 edge。
+1. **零代码**：厂商提供 OpenAI 兼容 `/v1/audio/speech` 端点（OpenAI / 硅基流动 / 各类聚合站）→ 配一个 `{"type": "openai"}` 的 provider 即可；
+2. **小适配器**：特殊协议（如小米 MiMo 的 chat/completions 格式）→ 写一个 ~50 行子类注册进 `PROVIDER_TYPES`。
+
+```json
+{
+  "tts_backend": "mimo",
+  "tts": {
+    "providers": {
+      "mimo":   {"type": "mimo",   "base": "https://api.xiaomimimo.com/v1", "key": "...", "model": "mimo-v2.5-tts"},
+      "openai": {"type": "openai", "base": "https://api.openai.com/v1", "key": "...", "model": "gpt-4o-mini-tts"},
+      "cosy":   {"type": "cosyvoice", "root": "D:/CosyVoice", "model": "...", "ref_wav": "D:/ref/speaker.wav"}
+    },
+    "voice_maps": {
+      "mimo": {
+        "zh": {
+          "m_young":  [["苏打", 0], ["白桦", 0]],
+          "m_mature": [["白桦", -4], ["苏打", -3]],
+          "f_mature": [["茉莉", 0]]
+        }
+      }
+    }
+  }
+}
+```
+
+- `tts_backend` 取值 = 内置 provider 名，或 `tts.providers` 里自定义的名字；切换走 config / `--tts-backend` / 请求体 `"tts_backend"`（优先级最高）/ 插件管理页下拉（热生效）
+- **声线映射 voice_maps**：`性别_年龄`（m/f/x × child/young/mature）→ `[[声线, 升降半音], ...]` 池，同池按说话人编号轮转（同画像角色不同声）；半音负值 = 降 key（男声沧桑）；`"*"` 为兜底池。内置表在 `dub/tts_providers.py`（含耳朵校准过的 MiMo 中文表），config 同键覆盖，管理页可直接编辑 JSON 并热生效
+- 单句请求级覆盖：`POST /api/dub` 带 `"tts_voice": "苏打"` → 整片单声线（跳过画像映射）
+- 旧 `mimo` 段 / `DUB_MIMO_KEY` 自动迁移为 `providers.mimo`，老配置无感
+- 管理页「配音 TTS」：选 provider → 填 base/key/model → **测试试听**（页面直接播放合成结果）
 
 ## 启动本地服务
 

@@ -16,6 +16,7 @@ import numpy as np
 os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
 
 from . import audio
+from . import tts_providers
 
 SR_MIX = 44100
 SR_TTS = 24000
@@ -544,254 +545,68 @@ def _parse_lines(text: str) -> dict[int, str]:
 
 
 # --------------------------------------------------------------------------- #
-# 5. 合成
+# 5. 合成（provider 抽象见 tts_providers.py；并发/声线解析/降 key 在这里统一）
 # --------------------------------------------------------------------------- #
 
-EDGE_VOICES = {
-    "zh": "zh-CN-XiaoxiaoNeural",
-    "zh-male": "zh-CN-YunxiNeural",
-    "en": "en-US-AriaNeural",
-    "en-male": "en-US-GuyNeural",
-    "ja": "ja-JP-NanamiNeural",
-    "ja-male": "ja-JP-KeitaNeural",
-    "ko": "ko-KR-SunHiNeural",
-    "ko-male": "ko-KR-InJoonNeural",
-}
-
-# 说话人 → 音色池（diarize 出的 speaker 序号索引）；--voice 显式给则全程单音色
-EDGE_SPEAKER_VOICES = {
-    "zh": ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunyangNeural"],
-    "en": ["en-US-AriaNeural", "en-US-GuyNeural", "en-US-MichelleNeural", "en-US-RogerNeural"],
-    # ja/ko 可用声线少（edge-tts --list-voices 实测），池小但男女有别
-    "ja": ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"],
-    "ko": ["ko-KR-SunHiNeural", "ko-KR-InJoonNeural", "ko-KR-HyunsuMultilingualNeural"],
-}
-
-# 声学画像 → 音色（性别/年龄必须对得上，老年男不配年轻女）。
-# 有画像时优先用这张表；缺的组合回退到上面的序号池。
-# 注意：这张表必须对 (gender, age) 六种组合**全覆盖**——voice_of 查不到
-# 会返回空声线直接炸 TTS，不会落回序号池。ja/ko 没有童声，child 就近落 young。
-EDGE_VOICE_BY_PROFILE = {
-    "zh": {
-        ("m", "child"): "zh-CN-YunxiaNeural",
-        ("m", "young"): "zh-CN-YunxiNeural",
-        ("m", "mature"): "zh-CN-YunyangNeural",
-        ("f", "child"): "zh-CN-XiaoxiaoNeural",
-        ("f", "young"): "zh-CN-XiaoxiaoNeural",
-        ("f", "mature"): "zh-CN-XiaoyiNeural",
-        ("x", "child"): "zh-CN-XiaoxiaoNeural",
-        ("x", "young"): "zh-CN-XiaoxiaoNeural",
-        ("x", "mature"): "zh-CN-XiaoxiaoNeural",
-    },
-    "en": {
-        ("m", "child"): "en-US-GuyNeural",
-        ("m", "young"): "en-US-AndrewNeural",
-        ("m", "mature"): "en-US-RogerNeural",
-        ("f", "child"): "en-US-AnaNeural",
-        ("f", "young"): "en-US-AriaNeural",
-        ("f", "mature"): "en-US-MichelleNeural",
-        ("x", "child"): "en-US-AriaNeural",
-        ("x", "young"): "en-US-AriaNeural",
-        ("x", "mature"): "en-US-AriaNeural",
-    },
-    "ja": {
-        ("m", "child"): "ja-JP-KeitaNeural",
-        ("m", "young"): "ja-JP-KeitaNeural",
-        ("m", "mature"): "ja-JP-KeitaNeural",
-        ("f", "child"): "ja-JP-NanamiNeural",
-        ("f", "young"): "ja-JP-NanamiNeural",
-        ("f", "mature"): "ja-JP-NanamiNeural",
-        ("x", "child"): "ja-JP-NanamiNeural",
-        ("x", "young"): "ja-JP-NanamiNeural",
-        ("x", "mature"): "ja-JP-NanamiNeural",
-    },
-    "ko": {
-        ("m", "child"): "ko-KR-HyunsuMultilingualNeural",
-        ("m", "young"): "ko-KR-HyunsuMultilingualNeural",
-        ("m", "mature"): "ko-KR-InJoonNeural",
-        ("f", "child"): "ko-KR-SunHiNeural",
-        ("f", "young"): "ko-KR-SunHiNeural",
-        ("f", "mature"): "ko-KR-SunHiNeural",
-        ("x", "child"): "ko-KR-SunHiNeural",
-        ("x", "young"): "ko-KR-SunHiNeural",
-        ("x", "mature"): "ko-KR-SunHiNeural",
-    },
-}
-
-
-# MiMo 音色（小米云端，24kHz WAV，见 dub/mimo.py）。值 = [(声线, 升降半音)] 池，
-# 同画像多声线按说话人编号轮转——两个同画像角色不再塌成同一声线。
-# 半音为负 = 降 key（男声低沉显沧桑）；升降只改音高，时长不变，后续贴合不受影响。
-# 2026-11-01 用户耳朵标注：zh 苏打/白桦=年轻男、冰糖=年轻女、茉莉=女沉稳(mature)、
-# mimo_default=女(AI 感强，只做兜底)；en Mia/Chloe=年轻女、Milo=年轻男、Dean=成熟男。
-# 成熟男降 key 代偿已定稿（用户 v2 复听）：白桦-4st≈55岁"很不错"、苏打-3st≈40岁"可用"。
-MIMO_VOICE_BY_PROFILE = {
-    "zh": {
-        ("m", "child"): [("苏打", 0.0), ("白桦", 0.0)],
-        ("m", "young"): [("苏打", 0.0), ("白桦", 0.0)],
-        ("m", "mature"): [("白桦", -4.0), ("苏打", -3.0)],
-        ("f", "child"): [("冰糖", 0.0)],
-        ("f", "young"): [("冰糖", 0.0)],
-        ("f", "mature"): [("茉莉", 0.0)],
-    },
-    "en": {
-        ("m", "child"): [("Milo", 0.0)],
-        ("m", "young"): [("Milo", 0.0)],
-        ("m", "mature"): [("Dean", 0.0)],
-        ("f", "child"): [("Chloe", 0.0)],
-        ("f", "young"): [("Mia", 0.0), ("Chloe", 0.0)],
-        ("f", "mature"): [("Mia", 0.0), ("Chloe", 0.0)],
-    },
-}
+def _resolve_voice(lang_map: dict, speaker: int, profile: dict | None,
+                   fallback: tuple[str, float]) -> tuple[str, float]:
+    """画像 → 声线池内按说话人编号轮转（跨段编号稳定）；
+    缺组合落 '*' 兜底，再不行落 provider 默认——绝不返回空声线。"""
+    pool = None
+    if profile:
+        pool = lang_map.get(f"{profile.get('gender', 'x')}_{profile.get('age', 'young')}")
+    if not pool:
+        pool = lang_map.get("*")
+    if not pool:
+        pool = [fallback]
+    return pool[speaker % len(pool)]
 
 
 def tts(segments: list[Segment], out_dir: str, backend: str = "stub", voice: str = "",
         device: str = "auto", ref_wav: str = "", lang: str = "zh",
-        profiles: dict | None = None, mimo_cfg: dict | None = None) -> Stats:
+        profiles: dict | None = None, mimo_cfg: dict | None = None,
+        provider=None, voice_maps: dict | None = None) -> Stats:
+    """批量合成。serve 路径传 provider 实例 + voice_maps（含用户覆盖）；
+    CLI/pipeline 路径传 backend 字符串，按 env 构造。
+    voice 非空 = 显式单声线（整片一个声音，跳过画像映射）。"""
     os.makedirs(out_dir, exist_ok=True)
     stats = Stats(segments=len(segments))
-    pool = EDGE_SPEAKER_VOICES.get(lang, EDGE_SPEAKER_VOICES["zh"])
-    by_profile = EDGE_VOICE_BY_PROFILE.get(lang, {})
+    if provider is None:
+        provider = tts_providers.build_provider(backend, {
+            "base": (mimo_cfg or {}).get("base", ""),
+            "key": (mimo_cfg or {}).get("key", ""),
+            "ref_wav": ref_wav, "device": device})
+    vmaps = voice_maps if voice_maps is not None else tts_providers.builtin_maps(provider.type)
+    lang_map = vmaps.get(lang) or vmaps.get("*") or {}
 
-    def voice_of(s: Segment) -> str:
+    def voice_of(s: Segment) -> tuple[str, float]:
         if voice:
-            return voice
-        if profiles and s.speaker in profiles:
-            p = profiles[s.speaker]
-            # 画像建档可能落在音乐/噪声上 → gender="x"，表里必须有兜底，绝不能返回空声线
-            return by_profile.get((p["gender"], p["age"])) or pool[s.speaker % len(pool)]
-        return pool[s.speaker % len(pool)]
+            return (voice, 0.0)
+        p = profiles.get(s.speaker) if profiles and s.speaker in profiles else None
+        return _resolve_voice(lang_map, s.speaker, p, provider.fallback_voice(lang))
 
-    if backend == "edge":
-        # 并发合成：微软端点单段一次 WebSocket 握手，串行是长视频的主要瓶颈之一
-        jobs = [(s.translated or s.text,
-                 os.path.join(out_dir, f"seg_{i:04d}.wav"), voice_of(s))
-                for i, s in enumerate(segments)]
-        _tts_edge_batch(jobs)
-        for (_, dst, _), s in zip(jobs, segments):
-            s.tts_path = dst
-        return stats
+    jobs = [(s.translated or s.text, os.path.join(out_dir, f"seg_{i:04d}.wav"), *voice_of(s))
+            for i, s in enumerate(segments)]
 
-    if backend == "mimo":
-        if not (mimo_cfg and mimo_cfg.get("key")):
-            raise ValueError("backend=mimo 需要 MiMo key（--mimo-key / DUB_MIMO_KEY / config.json mimo 段）")
-        by_mimo = MIMO_VOICE_BY_PROFILE.get(lang, {})
+    def one(job: tuple) -> None:
+        text, dst, v, st = job
+        provider.synthesize(text, v, dst)
+        if st:  # 升降 key：变调不变速，不影响后续时长贴合
+            data, sr = audio.load(dst)
+            audio.save(dst, audio.pitch_shift(data, sr, st), sr)
 
-        def mimo_voice_of(s: Segment) -> tuple[str, float]:
-            if voice:
-                return (voice, 0.0)
-            if profiles and s.speaker in profiles:
-                p = profiles[s.speaker]
-                # 池内按说话人编号轮转（跨段编号稳定）；gender="x" 无条目落 mimo_default
-                pool_ = by_mimo.get((p["gender"], p["age"])) or [("mimo_default", 0.0)]
-                return pool_[s.speaker % len(pool_)]
-            return ("mimo_default", 0.0)
+    if provider.concurrency > 1 and len(jobs) > 1:
+        from concurrent.futures import ThreadPoolExecutor
 
-        jobs = [(s.translated or s.text,
-                 os.path.join(out_dir, f"seg_{i:04d}.wav"), *mimo_voice_of(s))
-                for i, s in enumerate(segments)]
-        _tts_mimo_batch(jobs, mimo_cfg)
-        for job, s in zip(jobs, segments):
-            s.tts_path = job[1]
-        return stats
+        with ThreadPoolExecutor(max_workers=provider.concurrency) as ex:
+            list(ex.map(one, jobs))
+    else:
+        for j in jobs:
+            one(j)
 
-    for i, s in enumerate(segments):
-        dst = os.path.join(out_dir, f"seg_{i:04d}.wav")
-        text = s.translated or s.text
-        if backend == "stub":
-            _tts_stub(text, dst, s.duration)
-        elif backend == "cosyvoice":
-            _tts_cosyvoice(text, dst, ref_wav, device)
-        else:
-            raise ValueError(f"未知 TTS backend: {backend}")
+    for (_, dst, _v, _st), s in zip(jobs, segments):
         s.tts_path = dst
     return stats
-
-
-def _tts_stub(text: str, dst: str, duration: float) -> None:
-    """占位音：一声轻响，用来验证时间轴，不是给人听的。"""
-    dur = max(0.4, min(duration if duration > 0 else len(text) / 4.5, 30.0))
-    n = int(dur * SR_TTS)
-    t = np.arange(n) / SR_TTS
-    tone = 0.08 * np.sin(2 * np.pi * 440 * t) * np.exp(-3 * t)
-    audio.save(dst, tone.astype(np.float32), SR_TTS)
-
-
-def _tts_edge_batch(jobs: list[tuple[str, str, str]]) -> None:
-    """并发合成 [(text, dst, voice)]。微软端点偶发 403/断连，逐段重试三次。"""
-    import asyncio
-
-    import edge_tts
-
-    sem = asyncio.Semaphore(6)
-
-    async def one(text: str, dst: str, voice: str) -> None:
-        for attempt in range(3):
-            try:
-                async with sem:
-                    await edge_tts.Communicate(text, voice).save(dst)
-                return
-            except Exception as exc:
-                if attempt == 2:
-                    raise
-                print(f"    [tts] edge 重试 {attempt + 1}/3：{type(exc).__name__}", flush=True)
-                await asyncio.sleep(1.5 * (attempt + 1))
-
-    async def run():
-        await asyncio.gather(*(one(*j) for j in jobs))
-
-    asyncio.run(run())
-
-
-def _tts_mimo_batch(jobs: list[tuple], cfg: dict) -> None:
-    """并发合成 [(text, dst, voice, semitones)] 走小米 MiMo 云端。HTTP 接口偶发
-    超时，逐段重试三次；semitones 非 0 合成后升降 key（男声沧桑档，
-    见 MIMO_VOICE_BY_PROFILE），变调不变速、不影响后续时长贴合。"""
-    from concurrent.futures import ThreadPoolExecutor
-
-    from . import mimo
-
-    def one(text: str, dst: str, voice: str, semitones: float = 0.0) -> None:
-        for attempt in range(3):
-            try:
-                mimo.tts_one(cfg.get("base") or mimo.DEFAULT_BASE, cfg["key"], text, voice, dst)
-                if semitones:
-                    data, sr = audio.load(dst)
-                    audio.save(dst, audio.pitch_shift(data, sr, semitones), sr)
-                return
-            except Exception as exc:
-                if attempt == 2:
-                    raise
-                print(f"    [tts] mimo 重试 {attempt + 1}/3：{type(exc).__name__}", flush=True)
-                time.sleep(1.5 * (attempt + 1))
-
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        list(ex.map(lambda j: one(*j), jobs))
-
-
-_COSY = {}
-
-
-def _tts_cosyvoice(text: str, dst: str, ref_wav: str, device: str) -> None:
-    root = os.environ.get("DUB_COSYVOICE_DIR", "")
-    model_dir = os.environ.get("DUB_COSYVOICE_MODEL", "")
-    if not root or not model_dir:
-        raise RuntimeError("需要 DUB_COSYVOICE_DIR 与 DUB_COSYVOICE_MODEL")
-    if "m" not in _COSY:
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        from cosyvoice.cli.cosyvoice import CosyVoice2
-
-        _COSY["m"] = CosyVoice2(model_dir, load_jit=False, load_trt=False, fp16=False)
-    model = _COSY["m"]
-    if not ref_wav:
-        raise RuntimeError("CosyVoice 需要 --ref-wav 作为音色参考")
-    chunks = []
-    for out in model.inference_cross_lingual(text, ref_wav, stream=False):
-        chunks.append(out["tts_speech"].squeeze(0).numpy())
-    wav = np.concatenate(chunks) if chunks else np.zeros(1, dtype=np.float32)
-    audio.save(dst, wav, model.sample_rate)
-
 
 # --------------------------------------------------------------------------- #
 # 6. 对齐 + 混音

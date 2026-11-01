@@ -275,8 +275,9 @@ def _write_meta(job_dir: str, meta: dict) -> None:
 
 def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
             workdir: str, api_base: str = "", api_key: str = "", llm_model: str = "",
-            mimo_base: str = "", mimo_key: str = "") -> None:
-    """线程主体。job dict 由 serve 持有，状态同时落盘以便续跑/秒回。"""
+            tts_provider=None, voice_maps: dict | None = None, tts_voice: str = "") -> None:
+    """线程主体。job dict 由 serve 持有，状态同时落盘以便续跑/秒回。
+    tts_provider/voice_maps 由 serve 在线程启动时解析（热配置即时生效）。"""
     t0 = time.perf_counter()
     base = os.path.splitext(os.path.basename(src))[0]
     job_dir = os.path.join(workdir, "work", "stream",
@@ -364,9 +365,9 @@ def run_job(job: dict, src: str, lang: str, source_lang: str, tts_backend: str,
 
         stages.translate(segs, backend="llm", target=lang, chars_per_sec=cps,
                          api_base=api_base, api_key=api_key, model=llm_model)
-        stages.tts(segs, os.path.join(cdir, "tts"), backend=tts_backend,
-                   lang=lang, profiles=reg.profiles,
-                   mimo_cfg={"base": mimo_base, "key": mimo_key})
+        stages.tts(segs, os.path.join(cdir, "tts"), provider=tts_provider,
+                   lang=lang, profiles=reg.profiles, voice_maps=voice_maps,
+                   voice=tts_voice)
 
         _mix_chunk(bed, segs, os.path.join(cdir, "chunk.wav"), gain, voc_path=vocals)
         mp3 = os.path.join(cdir, "chunk.mp3")
