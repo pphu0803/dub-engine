@@ -1,4 +1,4 @@
-# data / 产物
+# data / media artifacts
 data/
 *.ts
 *.m4s
@@ -12,30 +12,28 @@ __pycache__/
 .venv/
 venv/
 
-# 模型权重
+# model weights
 models/
 *.pth
 *.pt
 *.onnx
 *.safetensors
 
-# 编辑器
+# editors / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# 运行产物
+# runtime artifacts
 *.log
 out/
 cache/
 
-# ���߲���
+# pipeline products
 work/
-out/
 .tmp/
-models/
 dl/dl_index.json
 
-# 本机 LLM 配置（含 key，勿提交）
+# local LLM config (contains keys - never commit)
 config.json
