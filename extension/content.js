@@ -14,7 +14,8 @@
   // 页面资源历史默认只留 ~250 条，长页面会挤掉音轨请求，扩容
   try { performance.setResourceTimingBufferSize(4000); } catch (_) {}
 
-  const SERVER = "http://127.0.0.1:8765";
+  // 引擎基址：端口由 dub-server.js 从 chrome.storage 读（面板可改，默认 8765）
+  DubServer.init();
   // 扩展名判定只看路径（? 之前），防信标/日志 URL 靠查询串混进来
   const MEDIA_RE = /\.(m4s|mp4|m4a|aac|webm|mp3|ogg|wav|flac)(\?|#|$)/i;
   const STREAM_RE = /videoplayback\?/i;
@@ -224,7 +225,7 @@
     }
     let job;
     try {
-      const r = await xfetch(SERVER + "/api/dub", {
+      const r = await xfetch(DubServer.base() + "/api/dub", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -288,7 +289,7 @@
 
   async function blobUrl(k) {
     if (player.blobs[k]) return player.blobs[k];
-    const r = await xfetch(`${SERVER}/api/job/${jobId}/audio/${k}`, {}, 60000);
+    const r = await xfetch(`${DubServer.base()}/api/job/${jobId}/audio/${k}`, {}, 60000);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const u = URL.createObjectURL(await r.blob());
     player.blobs[k] = u;
@@ -302,7 +303,7 @@
       const v = player.video || biggestVideo();
       const t = v && isFinite(v.currentTime) ? v.currentTime : -1;
       const q = t >= 0 ? `?t=${t.toFixed(1)}` : "";
-      const r = await xfetch(`${SERVER}/api/job/${jobId}${q}`);
+      const r = await xfetch(`${DubServer.base()}/api/job/${jobId}${q}`);
       st = await r.json();
     } catch (_) {
       return; // 引擎忙/瞬时失联，下轮再试

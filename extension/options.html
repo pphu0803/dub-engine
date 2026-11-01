@@ -59,8 +59,8 @@
 <body>
 <main>
   <h1>dub 引擎管理页</h1>
-  <div class="sub">本地引擎 <code>http://127.0.0.1:8765</code> · 配置改动写回 config.json 并热生效，无需重启</div>
-  <div class="errbox" id="offline">❌ 引擎离线。先启动：<code>python -m dub serve --port 8765</code></div>
+  <div class="sub">本地引擎 <code id="srvUrl">http://127.0.0.1:8765</code> · 配置改动写回 config.json 并热生效，无需重启（端口在插件面板设置）</div>
+  <div class="errbox" id="offline">❌ 引擎离线。先启动：<code>python -m dub serve --port <span id="srvPortHint">8765</span></code></div>
 
   <div class="card">
     <h2><span class="dot" id="dot"></span>引擎状态 <span class="msg" id="healthMsg" style="margin-left:auto;font-weight:400"></span></h2>
@@ -160,6 +160,7 @@
     <div class="empty" id="jobsEmpty" style="display:none">还没有任务</div>
   </div>
 </main>
+<script src="dub-server.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

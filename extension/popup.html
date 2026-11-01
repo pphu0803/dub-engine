@@ -16,7 +16,7 @@
   section { padding: 10px 14px; border-bottom: 1px solid #26262f; }
   .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
   .row label { flex: none; width: 66px; color: #9a9aa6; font-size: 12px; }
-  .row select { flex: 1; background: #22222b; color: #e8e8ee; border: 1px solid #33333f; border-radius: 6px; padding: 4px 8px; font-size: 12.5px; }
+  .row select, .row input { flex: 1; background: #22222b; color: #e8e8ee; border: 1px solid #33333f; border-radius: 6px; padding: 4px 8px; font-size: 12.5px; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
   .chip { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #22222b; border: 1px solid #33333f; color: #b8b8c4; }
   .chip.warn { border-color: #7a5c20; color: #e8c268; }
@@ -50,6 +50,10 @@
       <option value="ko">한국어</option>
     </select>
   </div>
+  <div class="row"><label for="port">引擎端口</label>
+    <input id="port" type="number" min="1" max="65535" step="1" placeholder="8765">
+  </div>
+  <div class="hint">与 python -m dub serve --port 保持一致；改动即生效，无需重启或改代码</div>
   <div class="switch row" style="margin-top:9px">
     <span>此站显示配音按钮</span>
     <input type="checkbox" id="siteBtn">
@@ -66,6 +70,7 @@
   <button id="open">⚙ 管理页</button>
   <button id="refresh" style="flex:0 0 44px">↻</button>
 </footer>
+<script src="dub-server.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

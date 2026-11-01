@@ -1,7 +1,6 @@
 /** options.js — 管理页逻辑：引擎状态 / LLM·MiMo 配置（写回 config.json 热生效）/ 插件偏好 / 任务管理。
  * 配置语义与引擎一致：保存时 key 留空 = 保持现值；「清除」= 发 null。 */
 (() => {
-  const SERVER = "http://127.0.0.1:8765";
   const $ = (id) => document.getElementById(id);
   const STAT = {
     running: ["⏳ 进行中", "run"], done: ["✅ 完成", "done"],
@@ -12,7 +11,7 @@
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const r = await fetch(SERVER + path, { signal: ctrl.signal, ...opts });
+      const r = await fetch(DubServer.base() + path, { signal: ctrl.signal, ...opts });
       return { code: r.status, data: await r.json().catch(() => ({})) };
     } finally {
       clearTimeout(t);
@@ -241,7 +240,7 @@
         .map((c) => `<span class="badge">${c}</span>`).join(" ");
       const err = j.error ? `<div class="hint">${esc(j.error)}</div>` : "";
       const ops = [];
-      if (j.final) ops.push(`<a href="${SERVER}/api/job/${j.id}/audio" target="_blank">试听</a>`);
+      if (j.final) ops.push(`<a href="${DubServer.base()}/api/job/${j.id}/audio" target="_blank">试听</a>`);
       ops.push(`<a href="javascript:void(0)" data-del="${j.id}">删除</a>`);
       return `<tr>
         <td>${head}<div style="margin-top:3px">${chips}</div></td>
@@ -279,11 +278,18 @@
 
   // ------------------------------------------------------------------ 启动
 
+  // 页头引擎地址与离线提示跟随面板设置的端口（DubServer.init 后与变更时都会经 refreshAll 刷新）
+  function syncServerText() {
+    $("srvUrl").textContent = DubServer.base();
+    $("srvPortHint").textContent = DubServer.port;
+  }
+
   async function refreshAll() {
+    syncServerText();
     const up = await loadHealth();
     if (up && !$("llmBase").dataset.filled) { await loadConfig(); $("llmBase").dataset.filled = "1"; }
     await loadJobs();
   }
-  refreshAll();
+  DubServer.init(refreshAll);
   setInterval(() => { if (document.visibilityState === "visible") refreshAll(); }, 8000);
 })();

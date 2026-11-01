@@ -1,6 +1,5 @@
-/** popup.js — 引擎状态灯 + 当前任务 + 默认语言/状态灯开关。纯扩展页面，无 background。 */
+/** popup.js — 引擎状态灯 + 当前任务 + 默认语言/状态灯/引擎端口。纯扩展页面，无 background。 */
 (() => {
-  const SERVER = "http://127.0.0.1:8765";
   const $ = (id) => document.getElementById(id);
 
   async function xfetch(url, timeoutMs = 4000) {
@@ -18,7 +17,7 @@
     let h = null;
     try {
       const t0 = performance.now();
-      const r = await xfetch(`${SERVER}/api/health`);
+      const r = await xfetch(`${DubServer.base()}/api/health`);
       h = await r.json();
       ping.textContent = `${Math.round(performance.now() - t0)}ms`;
     } catch (_) {
@@ -26,7 +25,7 @@
     }
     if (!h || !h.ok) {
       dot.className = "dot down";
-      line.textContent = "引擎离线——启动 python -m dub serve";
+      line.textContent = `引擎离线——启动 python -m dub serve --port ${DubServer.port}`;
       $("barWrap").style.display = "none";
       $("chips").innerHTML = "";
       return;
@@ -43,7 +42,7 @@
 
     // 当前任务：内存里最近的 running/partial 优先，否则显示最近一条
     try {
-      const r = await xfetch(`${SERVER}/api/jobs`);
+      const r = await xfetch(`${DubServer.base()}/api/jobs`);
       const jobs = (await r.json()).jobs || [];
       const act = jobs.find((j) => j.status === "running") ||
                   jobs.find((j) => j.status === "partial") || jobs[0];
@@ -75,6 +74,18 @@
   };
   hud.onchange = () => {
     try { chrome.storage.local.set({ dub_hud: hud.checked }); } catch (_) {}
+  };
+
+  // 引擎端口：与 python -m dub serve --port 对应；改动即生效（状态灯自动按新端口重连）
+  const portIn = $("port");
+  try {
+    chrome.storage.local.get({ dub_port: 8765 }, (r) => { portIn.value = r.dub_port; });
+  } catch (_) { portIn.value = DubServer.port; }
+  portIn.onchange = () => {
+    const p = parseInt(portIn.value, 10);
+    if (!(p >= 1 && p <= 65535)) { portIn.value = DubServer.port; return; } // 非法输入回退现值
+    portIn.value = p;
+    try { chrome.storage.local.set({ dub_port: p }); } catch (_) {}
   };
 
   // 此站显示配音按钮：按站点记忆（origin 粒度）。activeTab 权限在点开面板时
@@ -128,6 +139,6 @@
     catch (_) { window.open(chrome.runtime.getURL("options.html")); }
   };
   $("refresh").onclick = refresh;
-  refresh();
+  DubServer.init(refresh); // 首次读到存储端口、以及端口变更时，都重刷一次状态
   setInterval(refresh, 8000);
 })();
