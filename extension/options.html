@@ -58,51 +58,51 @@
 </head>
 <body>
 <main>
-  <h1>dub 引擎管理页</h1>
-  <div class="sub">本地引擎 <code id="srvUrl">http://127.0.0.1:8765</code> · 配置改动写回 config.json 并热生效，无需重启（端口在插件面板设置）</div>
-  <div class="errbox" id="offline">❌ 引擎离线。先启动：<code>python -m dub serve --port <span id="srvPortHint">8765</span></code></div>
+  <h1 data-i18n="o.title">dub 引擎管理页</h1>
+  <div class="sub"><code id="srvUrl">http://127.0.0.1:8765</code> <span data-i18n="o.sub">· 配置改动写回 config.json 并热生效，无需重启（端口在插件面板设置）</span></div>
+  <div class="errbox" id="offline"><span data-i18n="o.offline">❌ 引擎离线。先启动：</span> <code>python -m dub serve --port <span id="srvPortHint">8765</span></code></div>
 
   <div class="card">
-    <h2><span class="dot" id="dot"></span>引擎状态 <span class="msg" id="healthMsg" style="margin-left:auto;font-weight:400"></span></h2>
+    <h2><span class="dot" id="dot"></span><span data-i18n="o.cardEngine">引擎状态</span> <span class="msg" id="healthMsg" style="margin-left:auto;font-weight:400"></span></h2>
     <div class="grid">
-      <div class="kv"><b>版本</b><span id="hVer">—</span></div>
-      <div class="kv"><b>流水线</b><span id="hPipe">—</span></div>
-      <div class="kv"><b>默认 TTS</b><span id="hTts">—</span></div>
-      <div class="kv"><b>已运行</b><span id="hUp">—</span></div>
-      <div class="kv"><b>翻译 LLM</b><span id="hLlm">—</span></div>
-      <div class="kv"><b>MiMo TTS</b><span id="hMimo">—</span></div>
+      <div class="kv"><b data-i18n="o.ver">版本</b><span id="hVer">—</span></div>
+      <div class="kv"><b data-i18n="o.pipe">流水线</b><span id="hPipe">—</span></div>
+      <div class="kv"><b data-i18n="o.tts">默认 TTS</b><span id="hTts">—</span></div>
+      <div class="kv"><b data-i18n="o.up">已运行</b><span id="hUp">—</span></div>
+      <div class="kv"><b data-i18n="o.llm">翻译 LLM</b><span id="hLlm">—</span></div>
+      <div class="kv"><b data-i18n="o.mimo">MiMo TTS</b><span id="hMimo">—</span></div>
     </div>
   </div>
 
   <div class="card">
-    <h2>翻译 LLM</h2>
+    <h2 data-i18n="o.cardLlm">翻译 LLM</h2>
     <div class="three">
-      <field><label>接口地址 base（OpenAI 兼容）</label><input id="llmBase" placeholder="https://api.deepseek.com/v1" autocomplete="off"></field>
-      <field><label>模型名</label><input id="llmModel" placeholder="deepseek-chat" autocomplete="off"></field>
+      <field><label data-i18n="o.llmBase">接口地址 base（OpenAI 兼容）</label><input id="llmBase" placeholder="https://api.deepseek.com/v1" autocomplete="off"></field>
+      <field><label data-i18n="o.llmModel">模型名</label><input id="llmModel" placeholder="deepseek-chat" autocomplete="off"></field>
       <field><label>API key</label><input id="llmKey" type="password" placeholder="" autocomplete="off"></field>
     </div>
     <div class="acts">
-      <button id="llmTest">测试连通</button>
-      <button id="llmSave" class="primary">保存</button>
+      <button id="llmTest" data-i18n="o.test">测试连通</button>
+      <button id="llmSave" class="primary" data-i18n="o.save">保存</button>
       <span class="msg" id="llmMsg"></span>
     </div>
-    <div class="hint">key 留空 = 保持现值不变；清除请用「清除 key」。测试用的是表单里的值（key 留空则测已保存的）。</div>
+    <div class="hint" data-i18n="o.llmHint">key 留空 = 保持现值不变；清除请用「清除 key」。测试用的是表单里的值（key 留空则测已保存的）。</div>
   </div>
 
   <div class="card">
-    <h2>配音 TTS</h2>
+    <h2 data-i18n="o.cardTts">配音 TTS</h2>
     <div class="two">
-      <field><label>默认后端（provider，新任务生效）</label><select id="ttsBackend"></select></field>
-      <field><label>编辑 provider</label><select id="provSel"></select></field>
+      <field><label data-i18n="o.ttsBackend">默认后端（provider，新任务生效）</label><select id="ttsBackend"></select></field>
+      <field><label data-i18n="o.editProv">编辑 provider</label><select id="provSel"></select></field>
     </div>
     <div class="three">
       <field><label>type</label>
         <select id="provType">
-          <option value="edge">edge（微软在线，免 key）</option>
-          <option value="openai">openai（OpenAI 兼容 /audio/speech）</option>
-          <option value="mimo">mimo（小米云端）</option>
-          <option value="cosyvoice">cosyvoice（本地克隆）</option>
-          <option value="stub">stub（测试占位）</option>
+          <option value="edge" data-i18n="o.typeEdge">edge（微软在线，免 key）</option>
+          <option value="openai" data-i18n="o.typeOpenai">openai（OpenAI 兼容 /audio/speech）</option>
+          <option value="mimo" data-i18n="o.typeMimo">mimo（小米云端）</option>
+          <option value="cosyvoice" data-i18n="o.typeCosy">cosyvoice（本地克隆）</option>
+          <option value="stub" data-i18n="o.typeStub">stub（测试占位）</option>
         </select>
       </field>
       <field><label>base</label><input id="provBase" placeholder="https://api.openai.com/v1" autocomplete="off"></field>
@@ -110,34 +110,34 @@
     </div>
     <div class="three">
       <field><label>key</label><input id="provKey" type="password" autocomplete="off"></field>
-      <field><label>root（cosyvoice 仓库路径）</label><input id="provRoot" autocomplete="off"></field>
-      <field><label>ref_wav（cosyvoice 参考音频）</label><input id="provRef" autocomplete="off"></field>
+      <field><label data-i18n="o.provRoot">root（cosyvoice 仓库路径）</label><input id="provRoot" autocomplete="off"></field>
+      <field><label data-i18n="o.provRef">ref_wav（cosyvoice 参考音频）</label><input id="provRef" autocomplete="off"></field>
     </div>
     <div class="two">
-      <field><label>新建 provider 名（选「＋ 新建」时生效）</label><input id="provNewName" placeholder="如 siliconflow" autocomplete="off" style="display:none"></field>
-      <field><label>试听声线（留空=该后端默认）</label><input id="provTestVoice" autocomplete="off"></field>
+      <field><label data-i18n="o.provNew">新建 provider 名（选「＋ 新建」时生效）</label><input id="provNewName" placeholder="如 siliconflow" autocomplete="off" style="display:none"></field>
+      <field><label data-i18n="o.testVoice">试听声线（留空=该后端默认）</label><input id="provTestVoice" autocomplete="off"></field>
     </div>
-    <div class="hint">edge/stub 免配置。openai 兼容类型覆盖 OpenAI/硅基流动/各类聚合站。字段留空 = 保留现值。</div>
+    <div class="hint" data-i18n="o.ttsHint">edge/stub 免配置。openai 兼容类型覆盖 OpenAI/硅基流动/各类聚合站。字段留空 = 保留现值。</div>
     <div class="acts">
-      <button id="ttsSave" class="primary">保存 provider</button>
-      <button id="ttsSetDefault">设为默认后端</button>
-      <button id="ttsTest">测试试听</button>
-      <button id="provClearKey">清除 key</button>
+      <button id="ttsSave" class="primary" data-i18n="o.saveProv">保存 provider</button>
+      <button id="ttsSetDefault" data-i18n="o.setDefault">设为默认后端</button>
+      <button id="ttsTest" data-i18n="o.testListen">测试试听</button>
+      <button id="provClearKey" data-i18n="o.clearKey">清除 key</button>
       <span class="msg" id="ttsMsg"></span>
     </div>
     <audio id="ttsAudio" controls style="display:none;width:100%;margin-top:8px"></audio>
     <details style="margin-top:10px">
-      <summary style="cursor:pointer;color:#9a9aa6;font-size:12.5px">声线映射 voice_maps（高级，JSON；同键覆盖内置表）</summary>
+      <summary style="cursor:pointer;color:#9a9aa6;font-size:12.5px" data-i18n="o.voiceMaps">声线映射 voice_maps（高级，JSON；同键覆盖内置表）</summary>
       <field><textarea id="vmJson" rows="10" spellcheck="false"></textarea></field>
-      <div class="acts"><button id="vmSave">保存声线映射</button><span class="msg" id="vmMsg"></span></div>
-      <div class="hint">结构：{"provider": {"lang": {"m_young": [["声线", 半音], ...], "*": 兜底池}}}。半音负值=降 key；同池多声线按说话人轮转。{} = 全用内置表。</div>
+      <div class="acts"><button id="vmSave" data-i18n="o.saveVm">保存声线映射</button><span class="msg" id="vmMsg"></span></div>
+      <div class="hint" data-i18n="o.vmHint">结构：{"provider": {"lang": {"m_young": [["声线", 半音], ...], "*": 兜底池}}}。半音负值=降 key；同池多声线按说话人轮转。{} = 全用内置表。</div>
     </details>
   </div>
 
   <div class="card">
-    <h2>插件偏好</h2>
+    <h2 data-i18n="o.cardPrefs">插件偏好</h2>
     <div class="two">
-      <field><label>默认目标语言</label>
+      <field><label data-i18n="o.defLang">默认目标语言</label>
         <select id="lang">
           <option value="zh">中文</option>
           <option value="en">English</option>
@@ -145,22 +145,30 @@
           <option value="ko">한국어</option>
         </select>
       </field>
+      <field><label data-i18n="p.uiLang">界面语言</label>
+        <select id="uiLang">
+          <option value="" data-i18n="ui.auto">自动</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </field>
       <div>
-        <div class="switch"><span>页面状态灯</span><input type="checkbox" id="hud"></div>
-        <div class="hint">配音进度提示胶囊；页内「AI 配音/语言」按钮的显隐在插件面板按站点控制</div>
+        <div class="switch"><span data-i18n="o.hud2">页面状态灯</span><input type="checkbox" id="hud"></div>
+        <div class="hint" data-i18n="o.hud2Hint">配音进度提示胶囊；页内「AI 配音/语言」按钮的显隐在插件面板按站点控制</div>
       </div>
     </div>
   </div>
 
   <div class="card">
-    <h2>任务列表 <span style="font-weight:400;color:#9a9aa6;font-size:12px;margin-left:auto">内存任务 + 磁盘历史（最近 30）</span></h2>
+    <h2><span data-i18n="o.cardJobs">任务列表</span> <span style="font-weight:400;color:#9a9aa6;font-size:12px;margin-left:auto" data-i18n="o.jobsNote">内存任务 + 磁盘历史（最近 30）</span></h2>
     <table id="jobsTable"><thead>
-      <tr><th>任务</th><th>状态</th><th>进度</th><th>时长/耗时</th><th>时间</th><th style="width:96px">操作</th></tr>
+      <tr><th data-i18n="o.thJob">任务</th><th data-i18n="o.thStatus">状态</th><th data-i18n="o.thProg">进度</th><th data-i18n="o.thDur">时长/耗时</th><th data-i18n="o.thTime">时间</th><th style="width:96px" data-i18n="o.thOps">操作</th></tr>
     </thead><tbody id="jobsBody"></tbody></table>
-    <div class="empty" id="jobsEmpty" style="display:none">还没有任务</div>
+    <div class="empty" id="jobsEmpty" style="display:none" data-i18n="o.jobsEmpty">还没有任务</div>
   </div>
 </main>
 <script src="dub-server.js"></script>
+<script src="i18n.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

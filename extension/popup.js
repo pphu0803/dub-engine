@@ -25,19 +25,20 @@
     }
     if (!h || !h.ok) {
       dot.className = "dot down";
-      line.textContent = `引擎离线——启动 python -m dub serve --port ${DubServer.port}`;
+      line.textContent = DubI18n.t("p.offline", { port: DubServer.port });
       $("barWrap").style.display = "none";
       $("chips").innerHTML = "";
       return;
     }
     dot.className = `dot ${h.jobs && h.jobs.running > 0 ? "busy" : "up"}`;
     const chips = [
-      `流水线 ${h.pipeline_ver}`, `TTS ${h.tts_backend}`,
-      h.llm_set ? `LLM ${h.llm_model || "已配置"}` : "LLM 未配置",
-      h.mimo_set ? "MiMo ✓" : "MiMo ✗",
+      [`${DubI18n.t("o.pipe")} ${h.pipeline_ver}`, false],
+      [`TTS ${h.tts_backend}`, false],
+      [h.llm_set ? `LLM ${h.llm_model || DubI18n.t("p.chipSet")}` : DubI18n.t("p.chipLlmMissing"), !h.llm_set],
+      [h.mimo_set ? "MiMo ✓" : "MiMo ✗", !h.mimo_set],
     ];
     $("chips").innerHTML = chips
-      .map((c) => `<span class="chip${c.includes("未配置") || c.includes("✗") ? " warn" : ""}">${c}</span>`)
+      .map(([c, warn]) => `<span class="chip${warn ? " warn" : ""}">${c}</span>`)
       .join("");
 
     // 当前任务：内存里最近的 running/partial 优先，否则显示最近一条
@@ -47,17 +48,21 @@
       const act = jobs.find((j) => j.status === "running") ||
                   jobs.find((j) => j.status === "partial") || jobs[0];
       if (!act) {
-        line.textContent = "暂无任务";
+        line.textContent = DubI18n.t("p.noJobs");
         $("barWrap").style.display = "none";
         return;
       }
       const pct = act.chunks_total ? Math.round(100 * act.chunks_done / act.chunks_total) : 0;
-      const stat = { running: "⏳ 配音中", done: "✅ 完成", partial: "⚠️ 部分完成", error: "❌ 失败" }[act.status] || act.status;
-      line.textContent = `${stat} ${act.chunks_done}/${act.chunks_total} 段 · ${act.lang || "?"} · ${act.tts_backend || "?"}`;
+      const STAT_KEY = { running: "st.running", done: "st.done", partial: "st.partial", error: "st.error" }[act.status];
+      const stat = STAT_KEY ? DubI18n.t(STAT_KEY) : act.status;
+      line.textContent = DubI18n.t("p.jobLine", {
+        status: stat, done: act.chunks_done, total: act.chunks_total,
+        lang: act.lang || "?", tts: act.tts_backend || "?",
+      });
       $("barWrap").style.display = "block";
       $("fill").style.width = pct + "%";
     } catch (_) {
-      line.textContent = "任务状态获取失败";
+      line.textContent = DubI18n.t("p.jobsFail");
     }
   }
 
@@ -86,6 +91,15 @@
     if (!(p >= 1 && p <= 65535)) { portIn.value = DubServer.port; return; } // 非法输入回退现值
     portIn.value = p;
     try { chrome.storage.local.set({ dub_port: p }); } catch (_) {}
+  };
+
+  // 界面语言：chrome.storage.local.dub_ui_lang（""=自动跟随浏览器），i18n.js 即时切换
+  const uiLangSel = $("uiLang");
+  try {
+    chrome.storage.local.get({ dub_ui_lang: "" }, (r) => { uiLangSel.value = r.dub_ui_lang || ""; });
+  } catch (_) {}
+  uiLangSel.onchange = () => {
+    try { chrome.storage.local.set({ dub_ui_lang: uiLangSel.value }); } catch (_) {}
   };
 
   // 此站显示配音按钮：按站点记忆（origin 粒度）。activeTab 权限在点开面板时
@@ -120,17 +134,17 @@
 
   // 配音此页：发消息给 content script 开配（按钮藏着他也能配）
   $("dubNow").onclick = () => {
-    if (tabId == null) { $("jobLine").textContent = "此页不支持（非普通网页）"; return; }
+    if (tabId == null) { $("jobLine").textContent = DubI18n.t("p.unsupported"); return; }
     try {
       chrome.tabs.sendMessage(tabId, { cmd: "dub" }, () => {
         if (chrome.runtime.lastError) {
-          $("jobLine").textContent = "此页不支持（插件未注入，刷新页面试试）";
+          $("jobLine").textContent = DubI18n.t("p.unsupportedRefresh");
           return;
         }
         window.close();
       });
     } catch (_) {
-      $("jobLine").textContent = "此页不支持";
+      $("jobLine").textContent = DubI18n.t("p.unsupportedShort");
     }
   };
 
@@ -140,5 +154,6 @@
   };
   $("refresh").onclick = refresh;
   DubServer.init(refresh); // 首次读到存储端口、以及端口变更时，都重刷一次状态
+  DubI18n.init(refresh);   // 语言确定/切换后重刷动态文本（静态文本由 applyDOM 负责）
   setInterval(refresh, 8000);
 })();

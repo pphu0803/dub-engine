@@ -37,12 +37,12 @@
 <body>
 <header><span class="dot" id="dot"></span><b>dub 引擎</b><span class="dim" id="ping"></span></header>
 <section id="jobSec">
-  <div id="jobLine" class="dim">检查引擎…</div>
+  <div id="jobLine" class="dim" data-i18n="p.checking">检查引擎…</div>
   <div class="bar" id="barWrap" style="display:none"><i id="fill"></i></div>
   <div class="chips" id="chips"></div>
 </section>
 <section>
-  <div class="row"><label for="lang">默认语言</label>
+  <div class="row"><label for="lang" data-i18n="p.lang">默认语言</label>
     <select id="lang">
       <option value="zh">中文</option>
       <option value="en">English</option>
@@ -50,27 +50,35 @@
       <option value="ko">한국어</option>
     </select>
   </div>
-  <div class="row"><label for="port">引擎端口</label>
+  <div class="row"><label for="uiLang" data-i18n="p.uiLang">界面语言</label>
+    <select id="uiLang">
+      <option value="" data-i18n="ui.auto">自动</option>
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
+  </div>
+  <div class="row"><label for="port" data-i18n="p.port">引擎端口</label>
     <input id="port" type="number" min="1" max="65535" step="1" placeholder="8765">
   </div>
-  <div class="hint">与 python -m dub serve --port 保持一致；改动即生效，无需重启或改代码</div>
+  <div class="hint" data-i18n="p.portHint">与 python -m dub serve --port 保持一致；改动即生效，无需重启或改代码</div>
   <div class="switch row" style="margin-top:9px">
-    <span>此站显示配音按钮</span>
+    <span data-i18n="p.siteBtn">此站显示配音按钮</span>
     <input type="checkbox" id="siteBtn">
   </div>
-  <div class="hint">开启后本站常驻「AI 配音/语言」页内按钮；默认所有网页都不显示</div>
+  <div class="hint" data-i18n="p.siteBtnHint">开启后本站常驻「AI 配音/语言」页内按钮；默认所有网页都不显示</div>
   <div class="switch row" style="margin-top:9px">
-    <span>页面状态灯</span>
+    <span data-i18n="p.hud">页面状态灯</span>
     <input type="checkbox" id="hud">
   </div>
-  <div class="hint">配音进度提示胶囊；关闭后进度只进控制台（错误仍会提示）</div>
+  <div class="hint" data-i18n="p.hudHint">配音进度提示胶囊；关闭后进度只进控制台（错误仍会提示）</div>
 </section>
 <footer>
-  <button id="dubNow" class="primary">🎬 配音此页</button>
-  <button id="open">⚙ 管理页</button>
+  <button id="dubNow" class="primary" data-i18n="p.dubNow">🎬 配音此页</button>
+  <button id="open" data-i18n="p.options">⚙ 管理页</button>
   <button id="refresh" style="flex:0 0 44px">↻</button>
 </footer>
 <script src="dub-server.js"></script>
+<script src="i18n.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

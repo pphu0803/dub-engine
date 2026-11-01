@@ -63,7 +63,7 @@
   } catch (_) { /* 无扩展上下文时退 localStorage */ }
 
   const btn = document.createElement("button");
-  btn.textContent = "🎙 AI 配音";
+  btn.textContent = DubI18n.t("c.dub");
   Object.assign(btn.style, {
     position: "fixed", top: "58px", right: "12px", zIndex: 2147483647, // pill 下方，不遮挡进度
     padding: "8px 16px", borderRadius: "999px", border: "0", cursor: "pointer",
@@ -71,11 +71,11 @@
     background: "linear-gradient(135deg,#42e695,#3bb2b8)",
     boxShadow: "0 2px 10px rgba(0,0,0,.35)", display: "none",
   });
-  btn.onclick = () => begin().catch((e) => fail("启动失败：" + e.message));
+  btn.onclick = () => begin().catch((e) => fail(DubI18n.t("c.startFail", { msg: e.message })));
   document.documentElement.appendChild(btn);
 
   const tgl = document.createElement("button");
-  tgl.textContent = "🔈 切回原声";
+  tgl.textContent = DubI18n.t("c.toOrig");
   Object.assign(tgl.style, {
     position: "fixed", top: "104px", right: "12px", zIndex: 2147483647,
     padding: "8px 16px", borderRadius: "999px", border: "0", cursor: "pointer",
@@ -86,13 +86,13 @@
   tgl.onclick = () => {
     if (!player.started) return;
     player.mode = player.mode === "dub" ? "orig" : "dub";
-    tgl.textContent = player.mode === "dub" ? "🔈 切回原声" : "🔊 切回配音";
+    tgl.textContent = player.mode === "dub" ? DubI18n.t("c.toOrig") : DubI18n.t("c.toDub");
     if (player.mode === "orig") {
       el().pause();
       player.video.muted = false;
-      show("🔈 原声模式（配音暂停，进度仍跟随）");
+      show(DubI18n.t("c.origMode"));
     } else {
-      show("🔊 配音模式");
+      show(DubI18n.t("c.dubMode"));
       syncNow(true);
       ensurePlaying();
     }
@@ -114,7 +114,7 @@
     background: "rgba(20,20,24,.82)", boxShadow: "0 2px 10px rgba(0,0,0,.35)",
     appearance: "none", WebkitAppearance: "none", display: "none",
   });
-  langSel.title = "配音输出语言（对当前任务无影响，下次点击生效）";
+  langSel.title = DubI18n.t("c.langTitle");
   langSel.onchange = () => {
     lang = langSel.value;
     localStorage.setItem("dub_lang", lang);
@@ -137,11 +137,18 @@
     langSel.style.display = show ? "block" : "none";
   }
 
+  // 语言确定/切换时，按当前状态重刷页内动态文本（按钮文案/悬停提示）
+  DubI18n.init(() => {
+    btn.textContent = player.started ? DubI18n.t("c.redub") : DubI18n.t("c.dub");
+    tgl.textContent = player.mode === "dub" ? DubI18n.t("c.toOrig") : DubI18n.t("c.toDub");
+    langSel.title = DubI18n.t("c.langTitle");
+  });
+
   // 面板「配音此页」入口：无 background，content script 直接收消息开配
   try {
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.cmd === "dub" && !timer) {
-        begin().catch((e) => fail("启动失败：" + e.message));
+        begin().catch((e) => fail(DubI18n.t("c.startFail", { msg: e.message })));
       }
     });
   } catch (_) {}
@@ -212,7 +219,7 @@
 
   async function begin() {
     btn.style.display = "none";
-    show("读页面记录…");
+    show(DubI18n.t("c.reading"));
     const c = pick();
     let body;
     if (c) {
@@ -220,7 +227,7 @@
       body = { url: c.url, referer: location.href, lang };
     } else {
       // 抓不到直链（播放器变种/防 sniff）：退 page_url 模式，引擎用 yt-dlp 直取
-      show("⏳ 页内没抓到音轨，改用引擎 yt-dlp 直取…");
+      show(DubI18n.t("c.fallback"));
       body = { page_url: location.href, referer: location.href, lang };
     }
     let job;
@@ -232,15 +239,15 @@
       }, 60000); // page_url 模式服务端要先落音频文件再返回
       job = await r.json();
     } catch (e) {
-      fail("连不上本地引擎（python -m dub serve）：" + e.message);
+      fail(DubI18n.t("c.connFail", { msg: e.message }));
       return;
     }
     if (!job.job_id) {
-      fail(job.error || "提交失败");
+      fail(job.error || DubI18n.t("c.submitFail"));
       return;
     }
     jobId = job.job_id;
-    show("⏳ 排队…");
+    show(DubI18n.t("c.queued"));
     timer = setInterval(poll, 3000);
     poll();
   }
@@ -273,10 +280,10 @@
     player.dubDuration = 0;
     jobId = null;
     tgl.style.display = "none";
-    tgl.textContent = "🔈 切回原声";
-    btn.textContent = "🎙 AI 配音";
+    tgl.textContent = DubI18n.t("c.toOrig");
+    btn.textContent = DubI18n.t("c.dub");
     updateBtnVis();
-    show("⚠️ 检测到视频已切换（自动连播下一集）——配音是上一集的，已切回原声。点「AI 配音」为新视频配音", 12000, true);
+    show(DubI18n.t("c.mediaSwitched"), 12000, true);
   }
 
   function mediaChanged(v) {
@@ -321,8 +328,8 @@
     if (st.status === "done") {
       clearInterval(timer);
       if (player.started) {
-        show(`✅ 全部 ${chunks.length} 段完成（用时 ${st.total_s || "?"}s）`, 8000);
-        btn.textContent = "🎙 重新配音";
+        show(DubI18n.t("c.alldone", { n: chunks.length, s: st.total_s || "?" }), 8000);
+        btn.textContent = DubI18n.t("c.redub");
         updateBtnVis();
       } else if (chunks.length) {
         startPlayer();
@@ -334,17 +341,18 @@
       clearInterval(timer);
       const badN = chunks.filter((c) => c.status === "error").length;
       if (!player.started && chunks.some((c) => c.status === "done")) startPlayer();
-      show(`⚠️ ${doneN}/${chunks.length} 段完成，${badN} 段失败——点「重新配音」重试失败段`, 15000);
-      btn.textContent = "🎙 重新配音";
+      show(DubI18n.t("c.partial", { done: doneN, total: chunks.length, bad: badN }), 15000);
+      btn.textContent = DubI18n.t("c.redub");
       updateBtnVis();
       return;
     }
     if (st.status === "running") {
       if (!chunks.length) {
-        const STAGE_CN = { download: "yt-dlp 取音频", extract: "抽取整轨" };
-        show(`⏳ ${STAGE_CN[st.stage] || st.stage || "处理中"}…`);
+        const stage = { download: DubI18n.t("c.stageDownload"), extract: DubI18n.t("c.stageExtract") }[st.stage]
+          || st.stage || DubI18n.t("c.stage");
+        show(`⏳ ${stage}…`);
       } else {
-        show(`⏳ 配音中 ${doneN}/${chunks.length} 段`);
+        show(DubI18n.t("c.dubbing", { done: doneN, total: chunks.length }));
         if (player.started) syncNow(); // 新段就绪后，若正停在未完成段上则切回配音
       }
       if (!player.started && readyAt(chunks)) {
@@ -371,14 +379,14 @@
 
   function startPlayer() {
     const video = biggestVideo();
-    if (!video) { show("页面上没找到 <video>", 6000, true); updateBtnVis(); return; }
+    if (!video) { show(DubI18n.t("c.noVideo"), 6000, true); updateBtnVis(); return; }
     player.started = true;
     player.video = video;
     player.mode = "dub";
     video.muted = true;
     bind(video);
-    show("🔊 AI 配音播放中（分段流式；未完成段自动回退原声）");
-    btn.textContent = "🎙 重新配音";
+    show(DubI18n.t("c.playing"));
+    btn.textContent = DubI18n.t("c.redub");
     updateBtnVis();
     tgl.style.display = "block";
     syncNow(true);
@@ -403,7 +411,7 @@
     const a = el();
     const go = () => {
       if (player.video && !player.video.paused && a.paused) {
-        a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000, true));
+        a.play().catch((e) => show(DubI18n.t("c.playBlocked", { msg: e.message }), 6000, true));
       }
     };
     if (a.readyState >= 2) go();
@@ -439,7 +447,7 @@
       el().pause();
       player.cur = -1;
       video.muted = false;
-      show(`⏳ 第 ${c.i + 1} 段处理中——此处先听原声`);
+      show(DubI18n.t("c.segWaiting", { n: c.i + 1 }));
       return;
     }
 
@@ -453,7 +461,7 @@
         el().pause();
         nEl.playbackRate = video.playbackRate * player.align;
         nEl.currentTime = off;
-        if (!video.paused) nEl.play().catch((e) => show("❌ 换段播放失败：" + e.message, 6000, true));
+        if (!video.paused) nEl.play().catch((e) => show(DubI18n.t("c.switchFail", { msg: e.message }), 6000, true));
         player.curEl = 1 - player.curEl;
         player.cur = c.i;
         video.muted = true;
@@ -474,7 +482,7 @@
           const go = () => {
             if (player.cur !== c.i && !force) return;
             a.currentTime = off;
-            if (!video.paused) a.play().catch((e) => show("❌ 配音播放受阻：" + e.message, 6000));
+            if (!video.paused) a.play().catch((e) => show(DubI18n.t("c.playBlocked", { msg: e.message }), 6000));
           };
           if (a.readyState >= 2) go();
           else a.addEventListener("canplaythrough", go, { once: true });
@@ -482,7 +490,7 @@
           video.muted = true;
           preloadNext(c.i);
           console.log(`[dub] 段${c.i} blob 播放 off=${off.toFixed(1)}s`);
-        }).catch((e) => show("❌ 取段音频失败：" + e.message, 8000, true));
+        }).catch((e) => show(DubI18n.t("c.fetchFail", { msg: e.message }), 8000, true));
       }
     } else if (!video.paused) {
       const a = el();

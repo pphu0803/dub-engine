@@ -1,5 +1,7 @@
 # dub-engine — Real-time AI Dubbing for Web Videos
 
+[![CI](https://github.com/pphu0803/dub-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/pphu0803/dub-engine/actions/workflows/ci.yml)
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 > Open any video site, one click, and the video speaks your language — no downloads, no editing, right in the browser.
@@ -22,6 +24,7 @@ Click "🎙 AI Dub" on a video page, and about two minutes later the dubbing sta
 - **Local-first**: audio/video never leaves your machine; only dialogue text is sent to the LLM you configure
 - **Multiple output languages**: 中文 / English / 日本語 / 한국어, switchable in the extension; each language is cached independently
 - **Resumable**: re-dubbing the same video returns instantly; a failed segment doesn't affect the rest — resume with one click
+- **Bilingual UI**: popup, management console and in-page controls in 中文 / English — auto-detected from the browser, switchable anytime
 - **Browsers**: Chrome / Edge (MV3 extension)
 
 ## Current limitations
@@ -225,6 +228,7 @@ Notes:
 
 - **No buttons are shown on web pages by default** (non-video pages stay clean). Click the toolbar icon to open the **popup**:
   - Engine status light (green online / blue busy / red offline), current job progress, default language
+  - **UI language**: 中文 / English (auto-detected from the browser; also settable on the console)
   - **Engine port**: keep in sync with `python -m dub serve --port` (default 8765, applies immediately)
   - **🎬 Dub this page**: start dubbing the current tab with one click (works even without in-page buttons)
   - **Show dub buttons on this site**: enables the in-page "AI Dub / language" buttons for this site (remembered per site)
